@@ -1,83 +1,38 @@
-/*=========================================================
-  207 - LossCause : HOUSEHOLD
-=========================================================*/
+;WITH POLICY_HIGHEST_ID AS
+(
+    SELECT
+        P.GW_HDR_CASEID,
+        P.ID,
+        P.PRODUCT,
+        ROW_NUMBER() OVER (PARTITION BY P.GW_HDR_CASEID ORDER BY P.ID DESC) AS RN
+    FROM [SourceStaging].VECCASRN.VEC_GWP_POLICY P
+)
 Insert into [audit].[Tmp_Attr_Recon]
 (Matrixname, recon_ID, LOB, SS_IS_Match, SS_IS_MisMatch) values
-(
-    'LossCause'
-    ,207
-    ,'HOUSEHOLD'
-
-    ,( Select count(*) from (
-        Select C.CLAIM_REF, CAUSE_CIRC.[cctl_losscause_TYPECODE] AS LossCause
-        FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
-        join [SourceStaging].VECCASRN.VEC_GWP_POLICY P on C.GW_HDR_CASEID = P.GW_HDR_CASEID
-        LEFT JOIN [SourceStaging].VECCASRN.VEC_HH_INC_DETS D ON D.HH_CLAIMID = C.GW_HDR_CASEID
-        LEFT JOIN [SourceStaging].VECCASRN.VEC_HH_AXX_CIRCS CIRC_LKP  ON D.CIRC  = CIRC_LKP.ID
-        LEFT JOIN [SourceStaging].VECCASRN.VEC_HH_AXX_CIRCS CAUSE_LKP ON D.CAUSE = CAUSE_LKP.ID
-        LEFT JOIN [SourceStaging].[dbo].[CLAIM_LOSSCAUSE_CIRC_MAPPING] CAUSE_CIRC
-            ON CAUSE_LKP.CAUSE = CAUSE_CIRC.Vectus_CAUSE
-           AND CIRC_LKP.CIRC  = CAUSE_CIRC.Vectus_CIRCUMSTANCE
-        where LTRIM(RTRIM(C.GCURRENT)) = 'X'
-          and p.PRODUCT = 'HOUSEHOLD'
-
-        INTERSECT
-
-        SELECT c.ClaimNumber, c.LossCause      -- CONFIRM real column name on dbo.IS_CLAIM
-            FROM dbo.IS_CLAIM c
-                JOIN dbo.IS_POLICY p on c.PolicyID = p.PUBLICID
-            WHERE c.PublicID IS NOT NULL
-              and POLICYTYPE = 'PHPersonalHome'
-        ) A
-    )
-
-    ,( Select count(*) from (
-        Select C.CLAIM_REF, CAUSE_CIRC.[cctl_losscause_TYPECODE] AS LossCause
-        FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
-        join [SourceStaging].VECCASRN.VEC_GWP_POLICY P on C.GW_HDR_CASEID = P.GW_HDR_CASEID
-        LEFT JOIN [SourceStaging].VECCASRN.VEC_HH_INC_DETS D ON D.HH_CLAIMID = C.GW_HDR_CASEID
-        LEFT JOIN [SourceStaging].VECCASRN.VEC_HH_AXX_CIRCS CIRC_LKP  ON D.CIRC  = CIRC_LKP.ID
-        LEFT JOIN [SourceStaging].VECCASRN.VEC_HH_AXX_CIRCS CAUSE_LKP ON D.CAUSE = CAUSE_LKP.ID
-        LEFT JOIN [SourceStaging].[dbo].[CLAIM_LOSSCAUSE_CIRC_MAPPING] CAUSE_CIRC
-            ON CAUSE_LKP.CAUSE = CAUSE_CIRC.Vectus_CAUSE
-           AND CIRC_LKP.CIRC  = CAUSE_CIRC.Vectus_CIRCUMSTANCE
-        where LTRIM(RTRIM(C.GCURRENT)) = 'X'
-          and p.PRODUCT = 'HOUSEHOLD'
-
-        EXCEPT
-
-        SELECT c.ClaimNumber, c.LossCause
-            FROM dbo.IS_CLAIM c
-                JOIN dbo.IS_POLICY p on c.PolicyID = p.PUBLICID
-            WHERE c.PublicID IS NOT NULL
-              and POLICYTYPE = 'PHPersonalHome'
-        ) B
-    )
-),
-
-/*=========================================================
-  207 - LossCause : MOTOR
-=========================================================*/
 (
     'LossCause'
     ,207
     ,'MOTOR'
 
     ,( Select count(*) from (
-        Select C.CLAIM_REF, MAP.[cctl_losscause_typecode] AS LossCause
+        Select C.CLAIM_REF, CAUSE.[cctl_losscause_typecode] AS LossCause
         FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
-        join [SourceStaging].VECCASRN.VEC_GWP_POLICY P on C.GW_HDR_CASEID = P.GW_HDR_CASEID
-        LEFT JOIN [SourceStaging].VECCASRN.VEC_GW_CIRCS_INC INC ON C.GW_HDR_CASEID = INC.GW_HDR_CASEID
-        LEFT JOIN [SourceStaging].VECCASRN.VEC_GW_CIRCS_REF REF ON REF.ID = INC.GW_CIRCS_REFID
-        LEFT JOIN [SourceStaging].[dbo].[MOTOR_CIRC_LOSSCAUSE_MAPPING] MAP
-            ON REF.LOSSCAUSE     = MAP.VECTUS_LOSSCAUSE       -- CONFIRM real column names on REF
-           AND REF.CIRCUMSTANCE  = MAP.VECTUS_CIRCUMSTANCE
+        INNER JOIN POLICY_HIGHEST_ID P ON P.GW_HDR_CASEID = C.GW_HDR_CASEID AND P.RN = 1
+        LEFT JOIN [SourceStaging].VECCASRN.VEC_GW_CIRCS_INC INC
+            ON C.GW_HDR_CASEID = INC.GW_HDR_CASEID AND LTRIM(RTRIM(INC.GCURRENT)) = 'X'
+        LEFT JOIN [SourceStaging].VECCASRN.VEC_GW_CIRCS_TYP TYP
+            ON INC.GW_CIRCS_TYPID = TYP.ID
+        LEFT JOIN [SourceStaging].[dbo].[MOTOR_CIRC_LOSSCAUSE_MAPPING] CAUSE
+            ON TYP.TYPCODE      = CAUSE.VECTUS_LOSSCAUSE
+           AND C.INCIDENT_CODE  = CAUSE.VECTUS_CIRCUMSTANCE
         where LTRIM(RTRIM(C.GCURRENT)) = 'X'
-          and p.PRODUCT = 'MOTOR'
+          and UPPER(LTRIM(RTRIM(P.PRODUCT))) = 'MOTOR'
+          AND COALESCE(NULLIF(UPPER(LTRIM(RTRIM(C.INCIDENT_CODE))), ''), '#NULL#') <> 'WINDSCREEN'
+          AND NULLIF(LTRIM(RTRIM(C.CLAIM_REF)), '') IS NOT NULL
 
         INTERSECT
 
-        SELECT c.ClaimNumber, c.LossCause
+        SELECT c.ClaimNumber, c.LossCause      -- CONFIRM real column name on dbo.IS_CLAIM
             FROM dbo.IS_CLAIM c
                 JOIN dbo.IS_POLICY p on c.PolicyID = p.PUBLICID
             WHERE c.PublicID IS NOT NULL
@@ -86,16 +41,20 @@ Insert into [audit].[Tmp_Attr_Recon]
     )
 
     ,( Select count(*) from (
-        Select C.CLAIM_REF, MAP.[cctl_losscause_typecode] AS LossCause
+        Select C.CLAIM_REF, CAUSE.[cctl_losscause_typecode] AS LossCause
         FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
-        join [SourceStaging].VECCASRN.VEC_GWP_POLICY P on C.GW_HDR_CASEID = P.GW_HDR_CASEID
-        LEFT JOIN [SourceStaging].VECCASRN.VEC_GW_CIRCS_INC INC ON C.GW_HDR_CASEID = INC.GW_HDR_CASEID
-        LEFT JOIN [SourceStaging].VECCASRN.VEC_GW_CIRCS_REF REF ON REF.ID = INC.GW_CIRCS_REFID
-        LEFT JOIN [SourceStaging].[dbo].[MOTOR_CIRC_LOSSCAUSE_MAPPING] MAP
-            ON REF.LOSSCAUSE     = MAP.VECTUS_LOSSCAUSE
-           AND REF.CIRCUMSTANCE  = MAP.VECTUS_CIRCUMSTANCE
+        INNER JOIN POLICY_HIGHEST_ID P ON P.GW_HDR_CASEID = C.GW_HDR_CASEID AND P.RN = 1
+        LEFT JOIN [SourceStaging].VECCASRN.VEC_GW_CIRCS_INC INC
+            ON C.GW_HDR_CASEID = INC.GW_HDR_CASEID AND LTRIM(RTRIM(INC.GCURRENT)) = 'X'
+        LEFT JOIN [SourceStaging].VECCASRN.VEC_GW_CIRCS_TYP TYP
+            ON INC.GW_CIRCS_TYPID = TYP.ID
+        LEFT JOIN [SourceStaging].[dbo].[MOTOR_CIRC_LOSSCAUSE_MAPPING] CAUSE
+            ON TYP.TYPCODE      = CAUSE.VECTUS_LOSSCAUSE
+           AND C.INCIDENT_CODE  = CAUSE.VECTUS_CIRCUMSTANCE
         where LTRIM(RTRIM(C.GCURRENT)) = 'X'
-          and p.PRODUCT = 'MOTOR'
+          and UPPER(LTRIM(RTRIM(P.PRODUCT))) = 'MOTOR'
+          AND COALESCE(NULLIF(UPPER(LTRIM(RTRIM(C.INCIDENT_CODE))), ''), '#NULL#') <> 'WINDSCREEN'
+          AND NULLIF(LTRIM(RTRIM(C.CLAIM_REF)), '') IS NOT NULL
 
         EXCEPT
 
