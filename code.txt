@@ -1,1 +1,23 @@
-fhgfnhjgvnh gvhjnv gncxfhrd6utrfkugjvbmhcfxsegsyjfv
+INSERT INTO audit.AttributeRecon_MismatchDetail
+    (Execution_id, Recon_id, LOBCode, ClaimRef, AttributeName, SS_Value, IS_Value, MismatchType)
+SELECT
+    @Execution_id, 207, F.LOBCode, F.CLAIM_REF, 'LossCause', F.SS_LossCause, ISC.IS_LossCause,
+    CASE WHEN ISC.ClaimNumber IS NULL THEN 'MISSING_IN_IS' ELSE 'MISMATCH' END
+FROM
+(
+    -- the SS query from section 5, minus the COUNT(*) wrapper
+    SELECT C.CLAIM_REF, 'MOTOR' AS LOBCode, MAP.[cctl_losscause_typecode] AS SS_LossCause
+    FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
+    JOIN [SourceStaging].VECCASRN.VEC_GWP_POLICY P ON C.GW_HDR_CASEID = P.GW_HDR_CASEID
+    LEFT JOIN [SourceStaging].VECCASRN.VEC_GW_CIRCS_INC INC ON C.GW_HDR_CASEID = INC.GW_HDR_CASEID
+    LEFT JOIN [SourceStaging].VECCASRN.VEC_GW_CIRCS_REF REF ON REF.ID = INC.GW_CIRCS_REFID
+    LEFT JOIN [SourceStaging].[dbo].[MOTOR_CIRC_LOSSCAUSE_MAPPING] MAP
+        ON REF.LOSSCAUSE = MAP.VECTUS_LOSSCAUSE AND REF.CIRCUMSTANCE = MAP.VECTUS_CIRCUMSTANCE
+    WHERE LTRIM(RTRIM(C.GCURRENT)) = 'X' AND UPPER(LTRIM(RTRIM(P.PRODUCT))) = 'MOTOR'
+
+    EXCEPT
+
+    SELECT C.CLAIM_REF, 'MOTOR', MAP.[cctl_losscause_typecode]
+    FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C  -- placeholder to satisfy column shape; real EXCEPT target is IS side below
+) F
+LEFT JOIN dbo.IS_CLAIM ISC ON ISC.ClaimNumber = F.CLAIM_REF;
