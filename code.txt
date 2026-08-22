@@ -1,18 +1,86 @@
-CREATE OR ALTER PROCEDURE audit.usp_AttrRecon_SS_IS
+/* CloseDate */
+CASE WHEN UPPER(LTRIM(RTRIM(C.CLAIM_STATUS))) = 'F'
+THEN
+    CASE 
+        WHEN NULLIF(LTRIM(RTRIM(S.RECORD_DATE)), '') IS NULL 
+         AND NULLIF(LTRIM(RTRIM(S.RECORD_TIME)), '') IS NULL 
+        THEN NULL
+
+        WHEN NULLIF(LTRIM(RTRIM(S.RECORD_DATE)), '') IS NOT NULL 
+         AND NULLIF(LTRIM(RTRIM(S.RECORD_TIME)), '') IS NULL 
+        THEN VARCHAR_FORMAT(DATE(S.RECORD_DATE), 'YYYY-MM-DD')
+
+        WHEN NULLIF(LTRIM(RTRIM(S.RECORD_DATE)), '') IS NULL 
+         AND NULLIF(LTRIM(RTRIM(S.RECORD_TIME)), '') IS NOT NULL 
+        THEN VARCHAR_FORMAT(TIME(S.RECORD_TIME), 'HH24:MI:SS')
+
+        ELSE VARCHAR_FORMAT(
+                TIMESTAMP(DATE(S.RECORD_DATE), TIME(S.RECORD_TIME)), 
+             'YYYY-MM-DD HH24:MI:SS') /* yyyy-mm-dd hh:mi:ss */
+
+VARCHAR_FORMAT(TIMESTAMP(DATE(S.RECORD_DATE), TIME(S.RECORD_TIME)), 'YYYY-MM-DD HH24:MI:SS')
+-- Result: '2026-08-22 12:30:45'
+    END
+END AS CloseDate,
+
+
+
+
+/* CloseDate */
+CASE WHEN UPPER(LTRIM(RTRIM(C.CLAIM_STATUS))) = 'F'
+THEN
+    CASE 
+        WHEN NULLIF(LTRIM(RTRIM(S.RECORD_DATE)), '') IS NULL 
+         AND NULLIF(LTRIM(RTRIM(S.RECORD_TIME)), '') IS NULL 
+        THEN NULL
+
+        WHEN NULLIF(LTRIM(RTRIM(S.RECORD_DATE)), '') IS NOT NULL 
+         AND NULLIF(LTRIM(RTRIM(S.RECORD_TIME)), '') IS NULL 
+        THEN CONVERT(VARCHAR(10), TRY_CONVERT(DATE, S.RECORD_DATE), 120)
+
+        WHEN NULLIF(LTRIM(RTRIM(S.RECORD_DATE)), '') IS NULL 
+         AND NULLIF(LTRIM(RTRIM(S.RECORD_TIME)), '') IS NOT NULL 
+        THEN CONVERT(VARCHAR(8), TRY_CONVERT(TIME, S.RECORD_TIME), 108)
+
+        ELSE CONVERT(VARCHAR(19), 
+                CAST(TRY_CONVERT(DATE, S.RECORD_DATE) AS DATETIME) 
+                + CAST(TRY_CONVERT(TIME, S.RECORD_TIME) AS DATETIME), 
+             120) /* 120 = yyyy-mm-dd hh:mi:ss */
+
+-- Your senior's version
+CONVERT(VARCHAR(19), CONVERT(datetime2, CONCAT(S.RECORD_DATE, ' ', S.RECORD_TIME)), 120)
+-- Result: '2026-08-22 12:30:45'
+
+-- My version
+CONVERT(VARCHAR(19), CAST(TRY_CONVERT(DATE, S.RECORD_DATE) AS DATETIME) + CAST(TRY_CONVERT(TIME, S.RECORD_TIME) AS DATETIME), 120)
+-- Result: '2026-08-22 12:30:45'
+    END
+END AS CloseDate,
+
+
+
+
+
+
+CREATE OR ALTER PROCEDURE audit.usp_AttrRecon_V2_SS
     @Execution_id BIGINT
 AS
 BEGIN
     SET NOCOUNT ON;
 
-    ;WITH POLICY_HIGHEST_ID AS ( /* identical to proc 1 */ ),
-    SS_ALL_RAW AS ( /* identical to proc 1 — only used here to backfill SS_value for audit */ ),
-
-    SS_ALL_TRANSFORMED AS
+    ;WITH POLICY_HIGHEST_ID AS
     (
-        -- 201/202/203/205: no business transformation exists between SS and IS for these —
-        -- just formatting, so pass raw through unchanged
+        SELECT P.GW_HDR_CASEID, P.POLICY_REF, P.ID, P.PRODUCT, P.POLICY_BRAND,
+               P.CUR_INCEP_DATE, P.POL_INCEP_DATE,
+               ROW_NUMBER() OVER (PARTITION BY P.GW_HDR_CASEID ORDER BY P.ID DESC) AS RN
+        FROM [SourceStaging].VECCASRN.VEC_GWP_POLICY P
+    ),
+    SS_ALL_RAW AS
+    (
         SELECT 201 AS Recon_id, LTRIM(RTRIM(C.CLAIM_REF)) AS Claim_Number,
                UPPER(LTRIM(RTRIM(C.PRODUCT))) AS LOBCode, 'Date of Loss' AS Parameter_Name,
+               LTRIM(RTRIM(C.CLAIM_REF)) AS Source_ID,
+               CASE WHEN UPPER(LTRIM(RTRIM(C.PRODUCT))) = 'MOTOR' THEN 'mig:mtr:' ELSE 'mig:hh:' END + LTRIM(RTRIM(C.CLAIM_REF)) AS PublicID,
                CONVERT(VARCHAR(10), C.ACTUAL_DOL, 23) AS SS_Value
         FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
         INNER JOIN POLICY_HIGHEST_ID P ON P.GW_HDR_CASEID = C.GW_HDR_CASEID AND P.RN = 1
@@ -23,6 +91,8 @@ BEGIN
         UNION ALL
 
         SELECT 202, LTRIM(RTRIM(C.CLAIM_REF)), UPPER(LTRIM(RTRIM(C.PRODUCT))), 'Reported Date',
+               LTRIM(RTRIM(C.CLAIM_REF)),
+               CASE WHEN UPPER(LTRIM(RTRIM(C.PRODUCT))) = 'MOTOR' THEN 'mig:mtr:' ELSE 'mig:hh:' END + LTRIM(RTRIM(C.CLAIM_REF)),
                CONVERT(VARCHAR(10), C.REPORTED_DATE, 23)
         FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
         INNER JOIN POLICY_HIGHEST_ID P ON P.GW_HDR_CASEID = C.GW_HDR_CASEID AND P.RN = 1
@@ -33,6 +103,8 @@ BEGIN
         UNION ALL
 
         SELECT 203, LTRIM(RTRIM(C.CLAIM_REF)), UPPER(LTRIM(RTRIM(C.PRODUCT))), 'Claim Number',
+               LTRIM(RTRIM(C.CLAIM_REF)),
+               CASE WHEN UPPER(LTRIM(RTRIM(C.PRODUCT))) = 'MOTOR' THEN 'mig:mtr:' ELSE 'mig:hh:' END + LTRIM(RTRIM(C.CLAIM_REF)),
                LTRIM(RTRIM(C.CLAIM_REF))
         FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
         INNER JOIN POLICY_HIGHEST_ID P ON P.GW_HDR_CASEID = C.GW_HDR_CASEID AND P.RN = 1
@@ -42,14 +114,11 @@ BEGIN
 
         UNION ALL
 
-        -- 204: No Claim Bonus Status — DOES transform, via TYPELIST_TABLE_MAPPING
-        -- (confirmed in this project's earlier full migration query: NCB.GW_TypeCode AS NCBValue_Adm)
         SELECT 204, LTRIM(RTRIM(C.CLAIM_REF)), 'MOTOR', 'No Claim Bonus Status',
-               LTRIM(RTRIM(NCB.GW_TypeCode))
+               LTRIM(RTRIM(C.CLAIM_REF)), 'mig:mtr:' + LTRIM(RTRIM(C.CLAIM_REF)),
+               LTRIM(RTRIM(C.NCB_STATUS))
         FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
         INNER JOIN POLICY_HIGHEST_ID P ON P.GW_HDR_CASEID = C.GW_HDR_CASEID AND P.RN = 1
-        LEFT JOIN [SourceStaging].[dbo].[TYPELIST_TABLE_MAPPING] NCB
-            ON NCB.Vectus_TypeCode = C.NCB_STATUS AND NCB.Typelist_Name = 'NoClaimBonus_Adm'
         WHERE UPPER(LTRIM(RTRIM(C.GCURRENT))) = 'X'
           AND (C.INCIDENT_CODE IS NULL OR UPPER(LTRIM(RTRIM(C.INCIDENT_CODE))) <> 'WINDSCREEN')
           AND NULLIF(LTRIM(RTRIM(C.CLAIM_REF)), '') IS NOT NULL
@@ -58,6 +127,8 @@ BEGIN
         UNION ALL
 
         SELECT 205, LTRIM(RTRIM(C.CLAIM_REF)), UPPER(LTRIM(RTRIM(C.PRODUCT))), 'Claim finalised date',
+               LTRIM(RTRIM(C.CLAIM_REF)),
+               CASE WHEN UPPER(LTRIM(RTRIM(C.PRODUCT))) = 'MOTOR' THEN 'mig:mtr:' ELSE 'mig:hh:' END + LTRIM(RTRIM(C.CLAIM_REF)),
                CAST(CASE WHEN S.RECORD_DATE IS NOT NULL AND S.RECORD_TIME IS NOT NULL
                          THEN CONVERT(VARCHAR(10), S.RECORD_DATE, 23) + ' ' + CONVERT(VARCHAR(8), S.RECORD_TIME, 108)
                     END AS VARCHAR(255))
@@ -73,14 +144,10 @@ BEGIN
 
         UNION ALL
 
-        -- 206: PM Admit Liability Flag — transformed via the real business CASE rule
         SELECT 206, LTRIM(RTRIM(C.CLAIM_REF)), 'MOTOR', 'PM Admit Liability Flag',
-               CASE
-                   WHEN INC.INSDADMITLIAB = 'Y' AND REF.LIABILITY IN ('Fault','Split/Liab','Fire/Theft') THEN '1'
-                   WHEN INC.INSDADMITLIAB = 'N' AND REF.LIABILITY IN ('Non Fault') THEN 'nofault'
-                   WHEN INC.INSDADMITLIAB = 'D' THEN 'denyingInvolvement_Adm'
-                   WHEN INC.INSDADMITLIAB IN ('P','U') THEN 'notYetKnown_Adm'
-               END
+               LTRIM(RTRIM(C.CLAIM_REF)), 'mig:mtr:' + LTRIM(RTRIM(C.CLAIM_REF)),
+               COALESCE(NULLIF(LTRIM(RTRIM(INC.INSDADMITLIAB)), ''), '#NULL#') + '|' +
+               COALESCE(NULLIF(LTRIM(RTRIM(REF.LIABILITY)), ''), '#NULL#')
         FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
         INNER JOIN POLICY_HIGHEST_ID P ON P.GW_HDR_CASEID = C.GW_HDR_CASEID AND P.RN = 1
         LEFT JOIN [SourceStaging].VECCASRN.VEC_GW_CIRCS_INC INC
@@ -93,16 +160,15 @@ BEGIN
 
         UNION ALL
 
-        -- 207 HH: transformed via CLAIM_LOSSCAUSE_CIRC_MAPPING
         SELECT 207, LTRIM(RTRIM(C.CLAIM_REF)), 'HOUSEHOLD', 'LOSS CAUSE',
-               CAUSE_CIRC.[cctl_losscause_TYPECODE]
+               LTRIM(RTRIM(C.CLAIM_REF)), 'mig:hh:' + LTRIM(RTRIM(C.CLAIM_REF)),
+               COALESCE(NULLIF(LTRIM(RTRIM(CAUSE_LKP.CAUSE)), ''), '#NULL#') + '|' +
+               COALESCE(NULLIF(LTRIM(RTRIM(CIRC_LKP.CIRC)), ''), '#NULL#')
         FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
         INNER JOIN POLICY_HIGHEST_ID P ON P.GW_HDR_CASEID = C.GW_HDR_CASEID AND P.RN = 1
         LEFT JOIN [SourceStaging].VECCASRN.VEC_HH_INC_DETS D ON D.HH_CLAIMID = C.GW_HDR_CASEID
         LEFT JOIN [SourceStaging].VECCASRN.VEC_HH_AXX_CIRCS CIRC_LKP ON D.CIRC = CIRC_LKP.ID
         LEFT JOIN [SourceStaging].VECCASRN.VEC_HH_AXX_CIRCS CAUSE_LKP ON D.CAUSE = CAUSE_LKP.ID
-        LEFT JOIN [SourceStaging].[dbo].[CLAIM_LOSSCAUSE_CIRC_MAPPING] CAUSE_CIRC
-            ON CAUSE_LKP.CAUSE = CAUSE_CIRC.Vectus_CAUSE AND CIRC_LKP.CIRC = CAUSE_CIRC.Vectus_CIRCUMSTANCE
         WHERE UPPER(LTRIM(RTRIM(C.GCURRENT))) = 'X'
           AND (C.INCIDENT_CODE IS NULL OR UPPER(LTRIM(RTRIM(C.INCIDENT_CODE))) <> 'WINDSCREEN')
           AND NULLIF(LTRIM(RTRIM(C.CLAIM_REF)), '') IS NOT NULL
@@ -110,8 +176,196 @@ BEGIN
 
         UNION ALL
 
-        -- 207 Motor: transformed via MOTOR_CIRC_LOSSCAUSE_MAPPING
         SELECT 207, LTRIM(RTRIM(C.CLAIM_REF)), 'MOTOR', 'LOSS CAUSE',
+               LTRIM(RTRIM(C.CLAIM_REF)), 'mig:mtr:' + LTRIM(RTRIM(C.CLAIM_REF)),
+               COALESCE(NULLIF(LTRIM(RTRIM(TYP.TYPCODE)), ''), '#NULL#') + '|' +
+               COALESCE(NULLIF(LTRIM(RTRIM(C.INCIDENT_CODE)), ''), '#NULL#')
+        FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
+        INNER JOIN POLICY_HIGHEST_ID P ON P.GW_HDR_CASEID = C.GW_HDR_CASEID AND P.RN = 1
+        LEFT JOIN [SourceStaging].VECCASRN.VEC_GW_CIRCS_INC INC
+            ON C.GW_HDR_CASEID = INC.GW_HDR_CASEID AND LTRIM(RTRIM(INC.GCURRENT)) = 'X'
+        LEFT JOIN [SourceStaging].VECCASRN.VEC_GW_CIRCS_TYP TYP ON INC.GW_CIRCS_TYPID = TYP.ID
+        WHERE UPPER(LTRIM(RTRIM(C.GCURRENT))) = 'X'
+          AND (C.INCIDENT_CODE IS NULL OR UPPER(LTRIM(RTRIM(C.INCIDENT_CODE))) <> 'WINDSCREEN')
+          AND NULLIF(LTRIM(RTRIM(C.CLAIM_REF)), '') IS NOT NULL
+          AND UPPER(LTRIM(RTRIM(C.PRODUCT))) = 'MOTOR'
+
+        UNION ALL
+
+        SELECT 208, LTRIM(RTRIM(C.CLAIM_REF)), 'MOTOR', 'Fault Rating',
+               LTRIM(RTRIM(C.CLAIM_REF)), 'mig:mtr:' + LTRIM(RTRIM(C.CLAIM_REF)),
+               COALESCE(NULLIF(LTRIM(RTRIM(INC.INSDADMITLIAB)), ''), '#NULL#') + '|' +
+               COALESCE(NULLIF(LTRIM(RTRIM(REF.LIABILITY)), ''), '#NULL#')
+        FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
+        INNER JOIN POLICY_HIGHEST_ID P ON P.GW_HDR_CASEID = C.GW_HDR_CASEID AND P.RN = 1
+        LEFT JOIN [SourceStaging].VECCASRN.VEC_GW_CIRCS_INC INC
+            ON C.GW_HDR_CASEID = INC.GW_HDR_CASEID AND LTRIM(RTRIM(INC.GCURRENT)) = 'X'
+        LEFT JOIN [SourceStaging].VECCASRN.VEC_GW_CIRCS_REF REF ON REF.ID = INC.GW_CIRCS_REFID
+        WHERE UPPER(LTRIM(RTRIM(C.GCURRENT))) = 'X'
+          AND (C.INCIDENT_CODE IS NULL OR UPPER(LTRIM(RTRIM(C.INCIDENT_CODE))) <> 'WINDSCREEN')
+          AND NULLIF(LTRIM(RTRIM(C.CLAIM_REF)), '') IS NOT NULL
+          AND UPPER(LTRIM(RTRIM(C.PRODUCT))) = 'MOTOR'
+
+        UNION ALL
+
+        SELECT 209, LTRIM(RTRIM(C.CLAIM_REF)), UPPER(LTRIM(RTRIM(C.PRODUCT))), 'Policy Number',
+               LTRIM(RTRIM(C.CLAIM_REF)),
+               CASE WHEN UPPER(LTRIM(RTRIM(C.PRODUCT))) = 'MOTOR' THEN 'mig:mtr:' ELSE 'mig:hh:' END + LTRIM(RTRIM(C.CLAIM_REF)),
+               LTRIM(RTRIM(P.POLICY_REF))
+        FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
+        INNER JOIN POLICY_HIGHEST_ID P ON P.GW_HDR_CASEID = C.GW_HDR_CASEID AND P.RN = 1
+        WHERE UPPER(LTRIM(RTRIM(C.GCURRENT))) = 'X'
+          AND (C.INCIDENT_CODE IS NULL OR UPPER(LTRIM(RTRIM(C.INCIDENT_CODE))) <> 'WINDSCREEN')
+          AND NULLIF(LTRIM(RTRIM(C.CLAIM_REF)), '') IS NOT NULL
+
+        UNION ALL
+
+        SELECT 210, LTRIM(RTRIM(C.CLAIM_REF)), UPPER(LTRIM(RTRIM(C.PRODUCT))), 'Policy Term Inception Date',
+               LTRIM(RTRIM(C.CLAIM_REF)),
+               CASE WHEN UPPER(LTRIM(RTRIM(C.PRODUCT))) = 'MOTOR' THEN 'mig:mtr:' ELSE 'mig:hh:' END + LTRIM(RTRIM(C.CLAIM_REF)),
+               CONVERT(VARCHAR(10), P.POL_INCEP_DATE, 23)
+        FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
+        INNER JOIN POLICY_HIGHEST_ID P ON P.GW_HDR_CASEID = C.GW_HDR_CASEID AND P.RN = 1
+        WHERE UPPER(LTRIM(RTRIM(C.GCURRENT))) = 'X'
+          AND (C.INCIDENT_CODE IS NULL OR UPPER(LTRIM(RTRIM(C.INCIDENT_CODE))) <> 'WINDSCREEN')
+          AND NULLIF(LTRIM(RTRIM(C.CLAIM_REF)), '') IS NOT NULL
+
+        UNION ALL
+
+        SELECT 211, LTRIM(RTRIM(C.CLAIM_REF)), 'MOTOR', 'Risk Unit/Vehicle Registration',
+               CONVERT(VARCHAR(64), VEH.ID),
+               'mig:advehicle' + CONVERT(VARCHAR(64), VEH.ID),
+               LTRIM(RTRIM(VEH.REG))
+        FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
+        INNER JOIN POLICY_HIGHEST_ID P ON P.GW_HDR_CASEID = C.GW_HDR_CASEID AND P.RN = 1
+        INNER JOIN [SourceStaging].VECCASRN.VEC_GW_MOTOR_TP TP ON TP.GW_HDR_CASEID = C.GW_HDR_CASEID
+        INNER JOIN [SourceStaging].VECCASRN.VEC_GW_VEHICLE VEH ON VEH.CASEID = TP.ID
+        WHERE LTRIM(RTRIM(C.GCURRENT)) = 'X'
+          AND UPPER(LTRIM(RTRIM(C.PRODUCT))) = 'MOTOR'
+
+        UNION ALL
+
+        SELECT 211, LTRIM(RTRIM(C.CLAIM_REF)), 'MOTOR', 'Risk Unit/Vehicle Registration',
+               CONVERT(VARCHAR(64), VEH.ID),
+               'mig:advehicle' + CONVERT(VARCHAR(64), VEH.ID),
+               LTRIM(RTRIM(VEH.REG))
+        FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
+        INNER JOIN POLICY_HIGHEST_ID P ON P.GW_HDR_CASEID = C.GW_HDR_CASEID AND P.RN = 1
+        INNER JOIN [SourceStaging].VECCASRN.VEC_GW_MOTOR_AD AD ON AD.GW_HDR_CASEID = C.GW_HDR_CASEID
+        INNER JOIN [SourceStaging].VECCASRN.VEC_GWP_SLCTD_RISK SR ON SR.GW_HDR_CASEID = C.GW_HDR_CASEID
+        INNER JOIN [SourceStaging].VECCASRN.VEC_GWP_RISKUNIT RU ON RU.GWP_POLICYID = SR.GWP_POLICYID AND RU.PUBLICID = SR.PUBLICID
+        INNER JOIN [SourceStaging].VECCASRN.VEC_GWP_VEHICLE VEH ON VEH.GWP_RISKUNITID = RU.ID
+        WHERE LTRIM(RTRIM(C.GCURRENT)) = 'X'
+          AND UPPER(LTRIM(RTRIM(C.PRODUCT))) = 'MOTOR'
+    ),
+    V2 AS ( SELECT * FROM audit.V2_ClaimAttr_Landing WHERE Execution_id = @Execution_id )
+
+    SELECT
+        COALESCE(V.Recon_id, S.Recon_id) AS Recon_id,
+        COALESCE(V.Claim_Number, S.Claim_Number) AS Claim_Number,
+        COALESCE(V.Source_ID, S.Source_ID) AS Source_ID,
+        COALESCE(V.PublicID, S.PublicID) AS PublicID,
+        COALESCE(V.LOBCode, S.LOBCode) AS LOBCode,
+        COALESCE(V.Parameter_Name, S.Parameter_Name) AS Parameter_Name,
+        V.V2_value, S.SS_Value,
+        CASE
+            WHEN V.V2_value IS NULL AND S.SS_Value IS NULL THEN 'PASS'
+            WHEN V.V2_value IS NULL OR S.SS_Value IS NULL THEN 'FAIL'
+            WHEN UPPER(LTRIM(RTRIM(V.V2_value))) = UPPER(LTRIM(RTRIM(S.SS_Value))) THEN 'PASS'
+            ELSE 'FAIL'
+        END AS V2_SS_result
+    INTO #Compared
+    FROM V2 V
+    FULL OUTER JOIN SS_ALL_RAW S
+        ON S.Source_ID = V.Source_ID
+       AND S.Parameter_Name = V.Parameter_Name;
+
+    MERGE audit.NonFinReconciliationresult AS R
+    USING
+    (
+        SELECT Recon_id, Parameter_Name, LOBCode,
+               SUM(CASE WHEN V2_value IS NOT NULL THEN 1 ELSE 0 END) AS V2Cnt,
+               SUM(CASE WHEN SS_Value IS NOT NULL THEN 1 ELSE 0 END) AS SSCnt,
+               SUM(CASE WHEN V2_SS_result = 'PASS' THEN 1 ELSE 0 END) AS MatchCnt,
+               SUM(CASE WHEN V2_SS_result = 'FAIL' THEN 1 ELSE 0 END) AS MismatchCnt
+        FROM #Compared
+        GROUP BY Recon_id, Parameter_Name, LOBCode
+    ) AS X
+    ON R.Execution_id = @Execution_id
+       AND R.Recon_id = X.Recon_id
+       AND R.Parameter_Name = X.Parameter_Name
+       AND R.LOBCode = X.LOBCode
+    WHEN MATCHED THEN
+        UPDATE SET R.V2_RecordCount = X.V2Cnt, R.SS_RecordCount_forV2 = X.SSCnt,
+                   R.V2_SS_MatchedRecords = X.MatchCnt, R.V2_SS_MismatchedRecords = X.MismatchCnt,
+                   R.V2_SS_result = CASE WHEN X.MismatchCnt = 0 THEN 'PASS' ELSE 'FAIL' END
+    WHEN NOT MATCHED THEN
+        INSERT (Execution_id, Recon_id, Parameter_Name, LOBCode,
+                V2_RecordCount, SS_RecordCount_forV2, V2_SS_MatchedRecords, V2_SS_MismatchedRecords, V2_SS_result, Created_at)
+        VALUES (@Execution_id, X.Recon_id, X.Parameter_Name, X.LOBCode,
+                X.V2Cnt, X.SSCnt, X.MatchCnt, X.MismatchCnt,
+                CASE WHEN X.MismatchCnt = 0 THEN 'PASS' ELSE 'FAIL' END, GETDATE());
+
+    MERGE audit.ClaimNonFinReconciliationData AS tgt
+    USING (SELECT * FROM #Compared WHERE V2_SS_result = 'FAIL') AS src
+    ON tgt.Execution_id = @Execution_id AND tgt.Recon_id = src.Recon_id AND tgt.Source_ID = src.Source_ID
+    WHEN MATCHED THEN
+        UPDATE SET tgt.V2_value = src.V2_value, tgt.SS_value = src.SS_Value,
+                   tgt.V2_SS_result = src.V2_SS_result, tgt.PublicID = src.PublicID
+    WHEN NOT MATCHED THEN
+        INSERT (Execution_id, Recon_id, Claim_Number, Source_ID, PublicID, LOBCode, Parameter_Name, V2_value, SS_value, V2_SS_result, Created_at)
+        VALUES (@Execution_id, src.Recon_id, src.Claim_Number, src.Source_ID, src.PublicID, src.LOBCode, src.Parameter_Name, src.V2_value, src.SS_Value, src.V2_SS_result, GETDATE());
+
+    DROP TABLE #Compared;
+END
+
+
+
+
+
+
+CREATE OR ALTER PROCEDURE audit.usp_AttrRecon_SS_IS
+    @Execution_id BIGINT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    ;WITH POLICY_HIGHEST_ID AS
+    (
+        SELECT P.GW_HDR_CASEID, P.POLICY_REF, P.ID, P.PRODUCT, P.POLICY_BRAND,
+               P.CUR_INCEP_DATE, P.POL_INCEP_DATE,
+               ROW_NUMBER() OVER (PARTITION BY P.GW_HDR_CASEID ORDER BY P.ID DESC) AS RN
+        FROM [SourceStaging].VECCASRN.VEC_GWP_POLICY P
+    ),
+    SS_ALL_TRANSFORMED AS
+    (
+        -- 201-205, 209, 210: no known business transformation — same shape as V2_SS's
+        -- SS_ALL_RAW blocks. Copy those blocks here unchanged (Source_ID/PublicID/value logic identical).
+
+        SELECT 206 AS Recon_id, LTRIM(RTRIM(C.CLAIM_REF)) AS Claim_Number, 'MOTOR' AS LOBCode,
+               'PM Admit Liability Flag' AS Parameter_Name,
+               LTRIM(RTRIM(C.CLAIM_REF)) AS Source_ID,
+               'mig:mtr:' + LTRIM(RTRIM(C.CLAIM_REF)) AS PublicID,
+               CASE
+                   WHEN INC.INSDADMITLIAB = 'Y' AND REF.LIABILITY IN ('Fault','Split/Liab','Fire/Theft') THEN '1'
+                   WHEN INC.INSDADMITLIAB = 'N' AND REF.LIABILITY IN ('Non Fault') THEN 'nofault'
+                   WHEN INC.INSDADMITLIAB = 'D' THEN 'denyingInvolvement_Adm'
+                   WHEN INC.INSDADMITLIAB IN ('P','U') THEN 'notYetKnown_Adm'
+               END AS SS_Value
+        FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
+        INNER JOIN POLICY_HIGHEST_ID P ON P.GW_HDR_CASEID = C.GW_HDR_CASEID AND P.RN = 1
+        LEFT JOIN [SourceStaging].VECCASRN.VEC_GW_CIRCS_INC INC
+            ON C.GW_HDR_CASEID = INC.GW_HDR_CASEID AND LTRIM(RTRIM(INC.GCURRENT)) = 'X'
+        LEFT JOIN [SourceStaging].VECCASRN.VEC_GW_CIRCS_REF REF ON REF.ID = INC.GW_CIRCS_REFID
+        WHERE UPPER(LTRIM(RTRIM(C.GCURRENT))) = 'X'
+          AND (C.INCIDENT_CODE IS NULL OR UPPER(LTRIM(RTRIM(C.INCIDENT_CODE))) <> 'WINDSCREEN')
+          AND NULLIF(LTRIM(RTRIM(C.CLAIM_REF)), '') IS NOT NULL
+          AND UPPER(LTRIM(RTRIM(C.PRODUCT))) = 'MOTOR'
+
+        UNION ALL
+
+        SELECT 207, LTRIM(RTRIM(C.CLAIM_REF)), 'MOTOR', 'LOSS CAUSE',
+               LTRIM(RTRIM(C.CLAIM_REF)), 'mig:mtr:' + LTRIM(RTRIM(C.CLAIM_REF)),
                MAP.[cctl_losscause_typecode]
         FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
         INNER JOIN POLICY_HIGHEST_ID P ON P.GW_HDR_CASEID = C.GW_HDR_CASEID AND P.RN = 1
@@ -127,55 +381,30 @@ BEGIN
 
         UNION ALL
 
-        -- 208: Fault Rating — SAME transformation as 206, per script task's own comment
-        -- ("same column as #6 for now"). STILL UNCONFIRMED — flagged since our first pass
-        -- on this attribute. Get BA sign-off before trusting 208's results.
-        SELECT 208, LTRIM(RTRIM(C.CLAIM_REF)), 'MOTOR', 'Fault Rating',
-               CASE
-                   WHEN INC.INSDADMITLIAB = 'Y' AND REF.LIABILITY IN ('Fault','Split/Liab','Fire/Theft') THEN '1'
-                   WHEN INC.INSDADMITLIAB = 'N' AND REF.LIABILITY IN ('Non Fault') THEN 'nofault'
-                   WHEN INC.INSDADMITLIAB = 'D' THEN 'denyingInvolvement_Adm'
-                   WHEN INC.INSDADMITLIAB IN ('P','U') THEN 'notYetKnown_Adm'
-               END
+        SELECT 207, LTRIM(RTRIM(C.CLAIM_REF)), 'HOUSEHOLD', 'LOSS CAUSE',
+               LTRIM(RTRIM(C.CLAIM_REF)), 'mig:hh:' + LTRIM(RTRIM(C.CLAIM_REF)),
+               CAUSE_CIRC.[cctl_losscause_TYPECODE]
         FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
         INNER JOIN POLICY_HIGHEST_ID P ON P.GW_HDR_CASEID = C.GW_HDR_CASEID AND P.RN = 1
-        LEFT JOIN [SourceStaging].VECCASRN.VEC_GW_CIRCS_INC INC
-            ON C.GW_HDR_CASEID = INC.GW_HDR_CASEID AND LTRIM(RTRIM(INC.GCURRENT)) = 'X'
-        LEFT JOIN [SourceStaging].VECCASRN.VEC_GW_CIRCS_REF REF ON REF.ID = INC.GW_CIRCS_REFID
+        LEFT JOIN [SourceStaging].VECCASRN.VEC_HH_INC_DETS D ON D.HH_CLAIMID = C.GW_HDR_CASEID
+        LEFT JOIN [SourceStaging].VECCASRN.VEC_HH_AXX_CIRCS CIRC_LKP ON D.CIRC = CIRC_LKP.ID
+        LEFT JOIN [SourceStaging].VECCASRN.VEC_HH_AXX_CIRCS CAUSE_LKP ON D.CAUSE = CAUSE_LKP.ID
+        LEFT JOIN [SourceStaging].[dbo].[CLAIM_LOSSCAUSE_CIRC_MAPPING] CAUSE_CIRC
+            ON CAUSE_LKP.CAUSE = CAUSE_CIRC.Vectus_CAUSE AND CIRC_LKP.CIRC = CAUSE_CIRC.Vectus_CIRCUMSTANCE
         WHERE UPPER(LTRIM(RTRIM(C.GCURRENT))) = 'X'
           AND (C.INCIDENT_CODE IS NULL OR UPPER(LTRIM(RTRIM(C.INCIDENT_CODE))) <> 'WINDSCREEN')
           AND NULLIF(LTRIM(RTRIM(C.CLAIM_REF)), '') IS NOT NULL
-          AND UPPER(LTRIM(RTRIM(C.PRODUCT))) = 'MOTOR'
+          AND UPPER(LTRIM(RTRIM(C.PRODUCT))) = 'HOUSEHOLD'
 
-        UNION ALL
-
-        -- 209/210: no known transformation — pass through. CONFIRM.
-        SELECT 209, LTRIM(RTRIM(C.CLAIM_REF)), UPPER(LTRIM(RTRIM(C.PRODUCT))), 'Policy Number',
-               LTRIM(RTRIM(P.POLICY_REF))
-        FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
-        INNER JOIN POLICY_HIGHEST_ID P ON P.GW_HDR_CASEID = C.GW_HDR_CASEID AND P.RN = 1
-        WHERE UPPER(LTRIM(RTRIM(C.GCURRENT))) = 'X'
-          AND (C.INCIDENT_CODE IS NULL OR UPPER(LTRIM(RTRIM(C.INCIDENT_CODE))) <> 'WINDSCREEN')
-          AND NULLIF(LTRIM(RTRIM(C.CLAIM_REF)), '') IS NOT NULL
-
-        UNION ALL
-
-        SELECT 210, LTRIM(RTRIM(C.CLAIM_REF)), UPPER(LTRIM(RTRIM(C.PRODUCT))), 'Policy Term Inception Date',
-               CONVERT(VARCHAR(10), P.POL_INCEP_DATE, 23)
-        FROM [SourceStaging].VECCASRN.VEC_GW_CLAIM_SUM C
-        INNER JOIN POLICY_HIGHEST_ID P ON P.GW_HDR_CASEID = C.GW_HDR_CASEID AND P.RN = 1
-        WHERE UPPER(LTRIM(RTRIM(C.GCURRENT))) = 'X'
-          AND (C.INCIDENT_CODE IS NULL OR UPPER(LTRIM(RTRIM(C.INCIDENT_CODE))) <> 'WINDSCREEN')
-          AND NULLIF(LTRIM(RTRIM(C.CLAIM_REF)), '') IS NOT NULL
+        -- 208 Fault Rating, 211 Vehicle: extend using the same real-transformation
+        -- principle once the IS-side target values/tables are confirmed
     ),
-
     IS_ALL AS
     (
-        -- CONFIRM dbo.IS_CLAIM / dbo.IS_POLICY column names for each attribute before adding.
-        -- 201 and 203 already established earlier in this conversation:
         SELECT 201 AS Recon_id, c.ClaimNumber AS Claim_Number,
                CASE WHEN p.PolicyType = 'PMPersonalMotor' THEN 'MOTOR' ELSE 'HOUSEHOLD' END AS LOBCode,
-               'Date of Loss' AS Parameter_Name, CONVERT(VARCHAR(10), c.LossDate, 23) AS IS_Value
+               'Date of Loss' AS Parameter_Name, c.PublicID,
+               CONVERT(VARCHAR(10), c.LossDate, 23) AS IS_Value
         FROM dbo.IS_CLAIM c INNER JOIN dbo.IS_POLICY p ON c.PolicyID = p.PublicID
         WHERE c.PublicID IS NOT NULL
 
@@ -183,63 +412,129 @@ BEGIN
 
         SELECT 203, c.ClaimNumber,
                CASE WHEN p.PolicyType = 'PMPersonalMotor' THEN 'MOTOR' ELSE 'HOUSEHOLD' END,
-               'Claim Number', c.ClaimNumber
+               'Claim Number', c.PublicID, c.ClaimNumber
         FROM dbo.IS_CLAIM c INNER JOIN dbo.IS_POLICY p ON c.PolicyID = p.PublicID
         WHERE c.PublicID IS NOT NULL
 
-        -- 202, 204, 205, 206, 207, 208, 209, 210: add once real dbo.IS_CLAIM /
-        -- dbo.IS_POLICY column names are confirmed — not guessed here.
-    ),
+        UNION ALL
 
-    COMPARED AS
+        SELECT 206, c.ClaimNumber,
+               CASE WHEN p.PolicyType = 'PMPersonalMotor' THEN 'MOTOR' ELSE 'HOUSEHOLD' END,
+               'PM Admit Liability Flag', c.PublicID,
+               c.InsuredLiabilityView_Adm    -- CONFIRM real column name on dbo.IS_CLAIM
+        FROM dbo.IS_CLAIM c INNER JOIN dbo.IS_POLICY p ON c.PolicyID = p.PublicID
+        WHERE c.PublicID IS NOT NULL
+
+        UNION ALL
+
+        SELECT 207, c.ClaimNumber,
+               CASE WHEN p.PolicyType = 'PMPersonalMotor' THEN 'MOTOR' ELSE 'HOUSEHOLD' END,
+               'LOSS CAUSE', c.PublicID, c.LossCause    -- CONFIRM real column name
+        FROM dbo.IS_CLAIM c INNER JOIN dbo.IS_POLICY p ON c.PolicyID = p.PublicID
+        WHERE c.PublicID IS NOT NULL
+
+        -- 202, 204, 205, 208, 209, 210, 211: extend once real dbo.IS_CLAIM /
+        -- dbo.IS_POLICY / dbo.IS_VEHICLE column names are confirmed
+    ),
+    RawSS AS
     (
-        SELECT
-            COALESCE(T.Recon_id, I.Recon_id) AS Recon_id,
-            COALESCE(T.Claim_Number, I.Claim_Number) AS Claim_Number,
-            COALESCE(T.LOBCode, I.LOBCode) AS LOBCode,
-            COALESCE(T.Parameter_Name, I.Parameter_Name) AS Parameter_Name,
-            R.SS_Value AS SS_Value_Raw,
-            T.SS_Value AS SS_Value_Transformed,
-            I.IS_Value,
-            CASE
-                WHEN T.Claim_Number IS NULL OR I.Claim_Number IS NULL THEN 'FAIL'
-                WHEN UPPER(LTRIM(RTRIM(T.SS_Value))) = UPPER(LTRIM(RTRIM(I.IS_Value))) THEN 'PASS'
-                ELSE 'FAIL'
-            END AS SS_IS_result
-        FROM SS_ALL_TRANSFORMED T
-        FULL OUTER JOIN IS_ALL I
-            ON I.Claim_Number = T.Claim_Number AND I.Parameter_Name = T.Parameter_Name AND I.LOBCode = T.LOBCode
-        LEFT JOIN SS_ALL_RAW R
-            ON R.Claim_Number = COALESCE(T.Claim_Number, I.Claim_Number)
-           AND R.Parameter_Name = COALESCE(T.Parameter_Name, I.Parameter_Name)
-           AND R.LOBCode = COALESCE(T.LOBCode, I.LOBCode)
+        SELECT DISTINCT Source_ID, PublicID, Parameter_Name, SS_value
+        FROM audit.ClaimNonFinReconciliationData
+        WHERE Execution_id = @Execution_id
     )
 
-    UPDATE R
-    SET R.SS_IS_Count = X.Cnt, R.SS_IS_Match = X.MatchCnt, R.SS_IS_Mismatch = X.MismatchCnt,
-        R.SS_IS_result = CASE WHEN X.MismatchCnt = 0 THEN 'PASS' ELSE 'FAIL' END
-    FROM audit.NonFinReconciliationresult R
-    INNER JOIN
+    SELECT
+        COALESCE(T.Recon_id, I.Recon_id) AS Recon_id,
+        COALESCE(T.Claim_Number, I.Claim_Number) AS Claim_Number,
+        COALESCE(T.Source_ID, I.PublicID) AS Source_ID,
+        COALESCE(T.PublicID, I.PublicID) AS PublicID,
+        COALESCE(T.LOBCode, I.LOBCode) AS LOBCode,
+        COALESCE(T.Parameter_Name, I.Parameter_Name) AS Parameter_Name,
+        R.SS_value AS SS_Value_Raw,
+        T.SS_Value AS SS_Value_Transformed,
+        I.IS_Value,
+        CASE
+            WHEN T.SS_Value IS NULL AND I.IS_Value IS NULL THEN 'PASS'
+            WHEN T.SS_Value IS NULL OR I.IS_Value IS NULL THEN 'FAIL'
+            WHEN UPPER(LTRIM(RTRIM(T.SS_Value))) = UPPER(LTRIM(RTRIM(I.IS_Value))) THEN 'PASS'
+            ELSE 'FAIL'
+        END AS SS_IS_result
+    INTO #Compared2
+    FROM SS_ALL_TRANSFORMED T
+    FULL OUTER JOIN IS_ALL I ON I.PublicID = T.PublicID AND I.Parameter_Name = T.Parameter_Name
+    LEFT JOIN RawSS R ON R.PublicID = COALESCE(T.PublicID, I.PublicID) AND R.Parameter_Name = COALESCE(T.Parameter_Name, I.Parameter_Name);
+
+    MERGE audit.NonFinReconciliationresult AS R
+    USING
     (
-        SELECT Recon_id, Parameter_Name, LOBCode, COUNT(1) Cnt,
-               SUM(CASE WHEN SS_IS_result = 'PASS' THEN 1 ELSE 0 END) MatchCnt,
-               SUM(CASE WHEN SS_IS_result = 'FAIL' THEN 1 ELSE 0 END) MismatchCnt
-        FROM COMPARED GROUP BY Recon_id, Parameter_Name, LOBCode
-    ) X ON X.Recon_id = R.Recon_id AND X.Parameter_Name = R.Parameter_Name AND X.LOBCode = R.LOBCode
-    WHERE R.Execution_id = @Execution_id;
+        SELECT Recon_id, Parameter_Name, LOBCode,
+               SUM(CASE WHEN SS_Value_Transformed IS NOT NULL THEN 1 ELSE 0 END) AS SSCnt,
+               SUM(CASE WHEN IS_Value IS NOT NULL THEN 1 ELSE 0 END) AS ISCnt,
+               SUM(CASE WHEN SS_IS_result = 'PASS' THEN 1 ELSE 0 END) AS MatchCnt,
+               SUM(CASE WHEN SS_IS_result = 'FAIL' THEN 1 ELSE 0 END) AS MismatchCnt
+        FROM #Compared2
+        GROUP BY Recon_id, Parameter_Name, LOBCode
+    ) AS X
+    ON R.Execution_id = @Execution_id
+       AND R.Recon_id = X.Recon_id
+       AND R.Parameter_Name = X.Parameter_Name
+       AND R.LOBCode = X.LOBCode
+    WHEN MATCHED THEN
+        UPDATE SET R.SS_RecordCount_forIS = X.SSCnt, R.IS_RecordCount = X.ISCnt,
+                   R.SS_IS_MatchedRecords = X.MatchCnt, R.SS_IS_MismatchedRecords = X.MismatchCnt,
+                   R.SS_IS_result = CASE WHEN X.MismatchCnt = 0 THEN 'PASS' ELSE 'FAIL' END
+    WHEN NOT MATCHED THEN
+        INSERT (Execution_id, Recon_id, Parameter_Name, LOBCode,
+                SS_RecordCount_forIS, IS_RecordCount, SS_IS_MatchedRecords, SS_IS_MismatchedRecords, SS_IS_result, Created_at)
+        VALUES (@Execution_id, X.Recon_id, X.Parameter_Name, X.LOBCode,
+                X.SSCnt, X.ISCnt, X.MatchCnt, X.MismatchCnt,
+                CASE WHEN X.MismatchCnt = 0 THEN 'PASS' ELSE 'FAIL' END, GETDATE());
 
     MERGE audit.ClaimNonFinReconciliationData AS tgt
-    USING (SELECT * FROM COMPARED WHERE SS_IS_result = 'FAIL') AS src
-    ON tgt.Execution_id = @Execution_id AND tgt.Recon_id = src.Recon_id
-       AND tgt.Claim_Number = src.Claim_Number AND tgt.LOBCode = src.LOBCode
+    USING (SELECT * FROM #Compared2 WHERE SS_IS_result = 'FAIL') AS src
+    ON tgt.Execution_id = @Execution_id AND tgt.Recon_id = src.Recon_id AND tgt.PublicID = src.PublicID
     WHEN MATCHED THEN
-        UPDATE SET tgt.SS_value = src.SS_Value_Raw,
-                   tgt.SS_Value_Transformed = src.SS_Value_Transformed,
-                   tgt.IS_value = src.IS_Value,
-                   tgt.SS_IS_result = src.SS_IS_result
+        UPDATE SET tgt.SS_Value_Transformed = src.SS_Value_Transformed, tgt.IS_value = src.IS_Value, tgt.SS_IS_result = src.SS_IS_result
     WHEN NOT MATCHED THEN
-        INSERT (Execution_id, Recon_id, Claim_Number, LOBCode, Parameter_Name,
-                SS_value, SS_Value_Transformed, IS_value, SS_IS_result, Created_at)
-        VALUES (@Execution_id, src.Recon_id, src.Claim_Number, src.LOBCode, src.Parameter_Name,
-                src.SS_Value_Raw, src.SS_Value_Transformed, src.IS_Value, src.SS_IS_result, GETDATE());
+        INSERT (Execution_id, Recon_id, Claim_Number, Source_ID, PublicID, LOBCode, Parameter_Name, SS_Value_Transformed, IS_value, SS_IS_result, Created_at)
+        VALUES (@Execution_id, src.Recon_id, src.Claim_Number, src.Source_ID, src.PublicID, src.LOBCode, src.Parameter_Name, src.SS_Value_Transformed, src.IS_Value, src.SS_IS_result, GETDATE());
+
+    DROP TABLE #Compared2;
 END
+
+
+
+
+INSERT INTO audit.NonFinReconciliationresult
+    (Execution_id, Recon_id, Parameter_Name, LOBCode,
+     V2_RecordCount, SS_RecordCount_forV2, V2_SS_MatchedRecords, V2_SS_MismatchedRecords, V2_SS_result, Created_at)
+SELECT
+    @Execution_id, Recon_id, Parameter_Name, LOBCode,
+    SUM(CASE WHEN V2_value IS NOT NULL THEN 1 ELSE 0 END),
+    SUM(CASE WHEN SS_Value IS NOT NULL THEN 1 ELSE 0 END),
+    SUM(CASE WHEN V2_SS_result = 'PASS' THEN 1 ELSE 0 END),
+    SUM(CASE WHEN V2_SS_result = 'FAIL' THEN 1 ELSE 0 END),
+    CASE WHEN SUM(CASE WHEN V2_SS_result = 'FAIL' THEN 1 ELSE 0 END) = 0 THEN 'PASS' ELSE 'FAIL' END,
+    GETDATE()
+FROM #Compared
+GROUP BY Recon_id, Parameter_Name, LOBCode;
+
+
+UPDATE R
+SET R.SS_RecordCount_forIS = X.SSCnt,
+    R.IS_RecordCount = X.ISCnt,
+    R.SS_IS_MatchedRecords = X.MatchCnt,
+    R.SS_IS_MismatchedRecords = X.MismatchCnt,
+    R.SS_IS_result = CASE WHEN X.MismatchCnt = 0 THEN 'PASS' ELSE 'FAIL' END
+FROM audit.NonFinReconciliationresult R
+INNER JOIN
+(
+    SELECT Recon_id, Parameter_Name, LOBCode,
+           SUM(CASE WHEN SS_Value_Transformed IS NOT NULL THEN 1 ELSE 0 END) AS SSCnt,
+           SUM(CASE WHEN IS_Value IS NOT NULL THEN 1 ELSE 0 END) AS ISCnt,
+           SUM(CASE WHEN SS_IS_result = 'PASS' THEN 1 ELSE 0 END) AS MatchCnt,
+           SUM(CASE WHEN SS_IS_result = 'FAIL' THEN 1 ELSE 0 END) AS MismatchCnt
+    FROM #Compared2
+    GROUP BY Recon_id, Parameter_Name, LOBCode
+) X ON X.Recon_id = R.Recon_id AND X.Parameter_Name = R.Parameter_Name AND X.LOBCode = R.LOBCode
+WHERE R.Execution_id = @Execution_id;
