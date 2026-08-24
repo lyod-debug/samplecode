@@ -1,37 +1,99 @@
-/* ===== Start of proc: always fresh ===== */
-TRUNCATE TABLE IntermediateStaging_DEV.[audit].NonFinReconciliationresult;
-TRUNCATE TABLE IntermediateStaging_DEV.[audit].ClaimNonFinReconciliationData;
+-- ... your existing CTEs (POLICY_HIGHEST_ID, SS_RAW_CTE, SS_TRANSFORMED_CTE, IS_CTE, #Compared2 build) stay unchanged ...
+-- (join key fix I.Recon_id = ST.Recon_id from earlier in this conversation must be in place)
 
--- ... your existing CTEs (V2_CTE, SS_RAW_CTE, #Compared build) stay unchanged ...
-
-/*============================== Insert into NonFinReconciliationresult ==============================*/
-INSERT INTO IntermediateStaging_DEV.[audit].NonFinReconciliationresult
+/*============================== Update NonFinReconciliationresult (pure update — row always exists from Proc 1) ==============================*/
+UPDATE Res
+SET Res.SS_Transformed_Count = X.SSTransformedCnt,
+    Res.IS_Count             = X.ISCnt,
+    Res.SS_IS_Match          = X.MatchCnt,
+    Res.SS_IS_Mismatch       = X.MismatchCnt,
+    Res.SS_IS_result         = CASE WHEN X.MismatchCnt = 0 THEN 'PASS' ELSE 'FAIL' END
+FROM IntermediateStaging_DEV.[audit].NonFinReconciliationresult AS Res
+INNER JOIN
 (
-    Execution_id, Recon_id, Parameter_Name, LOBCode,
-    V2_Count, SS_Count, V2_SS_Match, V2_SS_Mismatch, V2_SS_result, Created_at
-)
-SELECT
-    @Execution_id,
-    Recon_id, Parameter_Name, LOBCode,
-    COUNT(1) AS V2Cnt,
-    COUNT(1) AS SSCnt,
-    SUM(CASE WHEN V2_SS_result = 'PASS' THEN 1 ELSE 0 END) AS MatchCnt,
-    SUM(CASE WHEN V2_SS_result = 'FAIL' THEN 1 ELSE 0 END) AS MismatchCnt,
-    CASE WHEN SUM(CASE WHEN V2_SS_result = 'FAIL' THEN 1 ELSE 0 END) = 0 THEN 'PASS' ELSE 'FAIL' END,
-    GETDATE()
-FROM #Compared
-GROUP BY Recon_id, Parameter_Name, LOBCode;
+    SELECT Recon_id, Parameter_Name, LOBCode,
+        COUNT(1) AS SSTransformedCnt,
+        COUNT(1) AS ISCnt,
+        SUM(CASE WHEN SS_IS_result = 'PASS' THEN 1 ELSE 0 END) AS MatchCnt,
+        SUM(CASE WHEN SS_IS_result = 'FAIL' THEN 1 ELSE 0 END) AS MismatchCnt
+    FROM #Compared2
+    GROUP BY Recon_id, Parameter_Name, LOBCode
+) AS X
+ON Res.Execution_id   = @Execution_id
+AND Res.Recon_id       = X.Recon_id
+AND Res.Parameter_Name = X.Parameter_Name
+AND Res.LOBCode        = X.LOBCode;
 
 
-/*============================== Insert into ClaimNonFinReconciliationData ==============================*/
-INSERT INTO IntermediateStaging_DEV.[audit].ClaimNonFinReconciliationData
+/*============================== Case A: claim now passes SS_IS, no active V2_SS failure → delete the row entirely ==============================*/
+-- CHANGED: join key was tgt.Public_id = src.Public_id (always NULL from Proc 1 → never matched, row never got cleaned up).
+-- Now joins on Recon_id + Source_id, which Proc 1 DOES populate.
+DELETE tgt
+FROM IntermediateStaging_DEV.[audit].ClaimNonFinReconciliationData tgt
+INNER JOIN #Compared2 src
+    ON tgt.Execution_id = @Execution_id
+    AND tgt.Recon_id     = src.Recon_id
+    AND tgt.Source_id    = src.Source_id
+WHERE src.SS_IS_result = 'PASS'
+    AND (tgt.V2_SS_result IS NULL OR tgt.V2_SS_result = 'PASS');
+
+
+/*============================== Case B: claim passes SS_IS but still has a genuine V2_SS failure → keep row, refresh SS_IS columns ==============================*/
+-- CHANGED: same join-key fix as Case A. Also added tgt.Public_id backfill — Proc 1's row has NULL Public_id;
+-- this is our first chance to fill it in since SS_TRANSFORMED_CTE builds Public_id in Proc 2.
+UPDATE tgt
+SET tgt.Public_id             = src.Public_id,
+    tgt.SS_Transformed_Value  = src.SS_Transformed_Value,
+    tgt.IS_value              = src.IS_Value,
+    tgt.SS_IS_result          = src.SS_IS_result
+FROM IntermediateStaging_DEV.[audit].ClaimNonFinReconciliationData tgt
+INNER JOIN #Compared2 src
+    ON tgt.Execution_id = @Execution_id
+    AND tgt.Recon_id     = src.Recon_id
+    AND tgt.Source_id    = src.Source_id
+WHERE src.SS_IS_result = 'PASS'
+    AND tgt.V2_SS_result = 'FAIL';
+
+
+/*============================== Case C/D: claim fails SS_IS — update existing row (already failed V2_SS) or insert new row (first-time failure) ==============================*/
+-- CHANGED: join key Public_id -> Recon_id + Source_id (same reason as above).
+-- CHANGED: WHEN MATCHED now also backfills Public_id.
+-- CHANGED: WHEN NOT MATCHED now hardcodes V2_SS_result = 'PASS' (previously referenced src.V2_SS_result,
+--          which doesn't exist in #Compared2 — that column simply isn't there, so this would have errored).
+--          Logic: if no row exists yet, this claim never failed V2_SS, so V2_SS was a pass by definition.
+-- CHANGED: src.SS_Value -> src.SS_Value_Raw (matches the actual column name in #Compared2; src.SS_Value doesn't exist).
+MERGE IntermediateStaging_DEV.[audit].ClaimNonFinReconciliationData AS tgt
+USING
 (
-    Execution_id, Recon_id, Source_id, Claim_Number, LOBCode, Parameter_Name,
-    V2_value, SS_value, V2_SS_result, Created_at
-)
-SELECT
-    @Execution_id,
-    Recon_id, Source_id, Claim_Number, LOBCode, Parameter_Name,
-    V2_Value, SS_Value, V2_SS_result, GETDATE()
-FROM #Compared
-WHERE V2_SS_result = 'FAIL';
+    SELECT c.*, v.V2_value AS V2_value_lookup
+    FROM (SELECT * FROM #Compared2 WHERE SS_IS_result = 'FAIL') c
+    LEFT JOIN IntermediateStaging_DEV.[audit].V2_ClaimAttr_Landing v
+        ON v.Execution_id   = @Execution_id
+        AND v.Recon_id       = c.Recon_id
+        AND v.Source_ID      = c.Source_ID
+        AND v.LOBCode        = c.LOBCode
+        AND v.Parameter_Name = c.Parameter_Name
+) AS src
+
+ON tgt.Execution_id = @Execution_id
+    AND tgt.Recon_id  = src.Recon_id
+    AND tgt.Source_id = src.Source_id
+
+WHEN MATCHED THEN
+    /* Case C: claim already has a row (failed earlier at V2_SS) — refresh this stage's columns, backfill Public_id */
+    UPDATE SET tgt.Public_id            = src.Public_id,
+        tgt.SS_Transformed_Value        = src.SS_Transformed_Value,
+        tgt.IS_value                    = src.IS_Value,
+        tgt.SS_IS_result                = src.SS_IS_result
+
+WHEN NOT MATCHED THEN
+    /* Case D: claim is failing for the first time, right here at SS_IS — seed the whole row */
+    INSERT (
+        Execution_id, Recon_id, Source_ID, Public_id, Claim_Number, LOBCode, Parameter_Name,
+        V2_value, SS_value, V2_SS_result, SS_Transformed_Value, IS_value, SS_IS_result, Created_at
+    )
+    VALUES (
+        @Execution_id, src.Recon_id, src.Source_ID, src.Public_id, src.Claim_Number, src.LOBCode, src.Parameter_Name,
+        src.V2_value_lookup, src.SS_Value_Raw, 'PASS',
+        src.SS_Transformed_Value, src.IS_Value, src.SS_IS_result, GETDATE()
+    );
