@@ -1,27 +1,37 @@
-/* Update NonFinReconciliationresult Table */
+/* ===== Start of proc: always fresh ===== */
+TRUNCATE TABLE IntermediateStaging_DEV.[audit].NonFinReconciliationresult;
+TRUNCATE TABLE IntermediateStaging_DEV.[audit].ClaimNonFinReconciliationData;
 
-UPDATE Res
-SET Res.SS_Transformed_Count = X.SSTransformedCnt,
-    Res.IS_Count             = X.ISCnt,
-    Res.SS_IS_Match          = X.MatchCnt,
-    Res.SS_IS_Mismatch       = X.MismatchCnt,
-    Res.SS_IS_result         = CASE WHEN X.MismatchCnt = 0 THEN 'PASS' ELSE 'FAIL' END
+-- ... your existing CTEs (V2_CTE, SS_RAW_CTE, #Compared build) stay unchanged ...
 
-FROM IntermediateStaging_DEV.[audit].NonFinReconciliationresult AS Res
-INNER JOIN
+/*============================== Insert into NonFinReconciliationresult ==============================*/
+INSERT INTO IntermediateStaging_DEV.[audit].NonFinReconciliationresult
 (
-    SELECT Recon_id, Parameter_Name, LOBCode,
+    Execution_id, Recon_id, Parameter_Name, LOBCode,
+    V2_Count, SS_Count, V2_SS_Match, V2_SS_Mismatch, V2_SS_result, Created_at
+)
+SELECT
+    @Execution_id,
+    Recon_id, Parameter_Name, LOBCode,
+    COUNT(1) AS V2Cnt,
+    COUNT(1) AS SSCnt,
+    SUM(CASE WHEN V2_SS_result = 'PASS' THEN 1 ELSE 0 END) AS MatchCnt,
+    SUM(CASE WHEN V2_SS_result = 'FAIL' THEN 1 ELSE 0 END) AS MismatchCnt,
+    CASE WHEN SUM(CASE WHEN V2_SS_result = 'FAIL' THEN 1 ELSE 0 END) = 0 THEN 'PASS' ELSE 'FAIL' END,
+    GETDATE()
+FROM #Compared
+GROUP BY Recon_id, Parameter_Name, LOBCode;
 
-        COUNT(1) AS SSTransformedCnt,
-        COUNT(1) AS ISCnt,
-        SUM(CASE WHEN SS_IS_result = 'PASS' THEN 1 ELSE 0 END) AS MatchCnt,
-        SUM(CASE WHEN SS_IS_result = 'FAIL' THEN 1 ELSE 0 END) AS MismatchCnt
 
-    FROM #Compared2
-    GROUP BY Recon_id, Parameter_Name, LOBCode
-
-) AS X
-ON Res.Execution_id  = @Execution_id
-AND Res.Recon_id      = X.Recon_id
-AND Res.Parameter_Name = X.Parameter_Name
-AND Res.LOBCode        = X.LOBCode;
+/*============================== Insert into ClaimNonFinReconciliationData ==============================*/
+INSERT INTO IntermediateStaging_DEV.[audit].ClaimNonFinReconciliationData
+(
+    Execution_id, Recon_id, Source_id, Claim_Number, LOBCode, Parameter_Name,
+    V2_value, SS_value, V2_SS_result, Created_at
+)
+SELECT
+    @Execution_id,
+    Recon_id, Source_id, Claim_Number, LOBCode, Parameter_Name,
+    V2_Value, SS_Value, V2_SS_result, GETDATE()
+FROM #Compared
+WHERE V2_SS_result = 'FAIL';
