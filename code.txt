@@ -1,36 +1,27 @@
--- Case A: claim now passes SS_IS, and had no other active failure (never failed V2_SS either)
--- → the row has no reason to exist anymore, remove it entirely
-DELETE tgt
-FROM audit.ClaimNonFinReconciliationData tgt
-INNER JOIN #Compared2 src
-    ON tgt.Execution_id = @Execution_id
-   AND tgt.Recon_id = src.Recon_id
-   AND tgt.PublicID = src.PublicID
-WHERE src.SS_IS_result = 'PASS'
-  AND (tgt.V2_SS_result IS NULL OR tgt.V2_SS_result = 'PASS');
+/* Update NonFinReconciliationresult Table */
 
--- Case B: claim now passes SS_IS, but still has a genuine active V2_SS failure
--- → keep the row (it's still legitimately broken at V2_SS), just clear the stale SS_IS columns
-UPDATE tgt
-SET tgt.SS_Value_Transformed = NULL,
-    tgt.IS_value = NULL,
-    tgt.SS_IS_result = 'PASS'
-FROM audit.ClaimNonFinReconciliationData tgt
-INNER JOIN #Compared2 src
-    ON tgt.Execution_id = @Execution_id
-   AND tgt.Recon_id = src.Recon_id
-   AND tgt.PublicID = src.PublicID
-WHERE src.SS_IS_result = 'PASS'
-  AND tgt.V2_SS_result = 'FAIL';
+UPDATE Res
+SET Res.SS_Transformed_Count = X.SSTransformedCnt,
+    Res.IS_Count             = X.ISCnt,
+    Res.SS_IS_Match          = X.MatchCnt,
+    Res.SS_IS_Mismatch       = X.MismatchCnt,
+    Res.SS_IS_result         = CASE WHEN X.MismatchCnt = 0 THEN 'PASS' ELSE 'FAIL' END
 
--- Case C: your existing MERGE — still-failing or newly-failing claims
-MERGE audit.ClaimNonFinReconciliationData AS tgt
-USING (SELECT * FROM #Compared2 WHERE SS_IS_result = 'FAIL') AS src
-ON tgt.Execution_id = @Execution_id AND tgt.Recon_id = src.Recon_id AND tgt.PublicID = src.PublicID
-WHEN MATCHED THEN
-    UPDATE SET tgt.SS_Value_Transformed = src.SS_Value_Transformed, tgt.IS_value = src.IS_Value, tgt.SS_IS_result = src.SS_IS_result
-WHEN NOT MATCHED THEN
-    INSERT (Execution_id, Recon_id, Claim_Number, Source_ID, PublicID, LOBCode, Parameter_Name,
-            V2_value, SS_value, SS_Value_Transformed, IS_value, SS_IS_result, Created_at)
-    VALUES (@Execution_id, src.Recon_id, src.Claim_Number, src.Source_ID, src.PublicID, src.LOBCode, src.Parameter_Name,
-            src.V2_value, src.SS_Value_Raw, src.SS_Value_Transformed, src.IS_Value, src.SS_IS_result, GETDATE());
+FROM IntermediateStaging_DEV.[audit].NonFinReconciliationresult AS Res
+INNER JOIN
+(
+    SELECT Recon_id, Parameter_Name, LOBCode,
+
+        COUNT(1) AS SSTransformedCnt,
+        COUNT(1) AS ISCnt,
+        SUM(CASE WHEN SS_IS_result = 'PASS' THEN 1 ELSE 0 END) AS MatchCnt,
+        SUM(CASE WHEN SS_IS_result = 'FAIL' THEN 1 ELSE 0 END) AS MismatchCnt
+
+    FROM #Compared2
+    GROUP BY Recon_id, Parameter_Name, LOBCode
+
+) AS X
+ON Res.Execution_id  = @Execution_id
+AND Res.Recon_id      = X.Recon_id
+AND Res.Parameter_Name = X.Parameter_Name
+AND Res.LOBCode        = X.LOBCode;
