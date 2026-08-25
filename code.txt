@@ -1,106 +1,57 @@
-/*============================== #Compared3 build (IS vs CCST) ==============================*/
-
--- Your IS_CTE and CCST_CTE go here, structured the same way as before:
--- IS_CTE:   SELECT Recon_id, Public_id, Claim_Number, LOBCode, Parameter_Name, IS_Value   FROM IS_CLAIM ... (union all per param)
--- CCST_CTE: SELECT Recon_id, Public_id, Claim_Number, LOBCode, Parameter_Name, CCST_Value FROM CCST_CLAIM ... (union all per param)
--- No transformation logic needed on either side since it's a straight load comparison.
-
-SELECT
-    COALESCE(I.Recon_id, CC.Recon_id) AS Recon_id,
-    COALESCE(I.Public_id, CC.Public_id) AS Public_id,
-    COALESCE(I.Claim_Number, CC.Claim_Number) AS Claim_Number,
-    COALESCE(I.LOBCode, CC.LOBCode) AS LOBCode,
-    COALESCE(I.Parameter_Name, CC.Parameter_Name) AS Parameter_Name,
-    I.IS_Value,
-    CC.CCST_Value,
-    CASE
-        WHEN I.IS_Value IS NULL AND CC.CCST_Value IS NULL THEN 'PASS'
-        WHEN I.IS_Value IS NULL OR CC.CCST_Value IS NULL THEN 'FAIL'
-        WHEN UPPER(LTRIM(RTRIM(I.IS_Value))) = UPPER(LTRIM(RTRIM(CC.CCST_Value))) THEN 'PASS'
-        ELSE 'FAIL'
-    END AS IS_CCST_result
-
-INTO #Compared3
-
-FROM IS_CTE I
-FULL OUTER JOIN CCST_CTE CC
-    ON I.Recon_id = CC.Recon_id
-    AND I.Public_id = CC.Public_id
-    AND I.Parameter_Name = CC.Parameter_Name;
-
-
-/*============================== Update NonFinReconciliationresult (pure update — row always exists from Proc 1) ==============================*/
-
-UPDATE Res
-SET Res.CCST_Count        = X.CCSTCnt,
-    Res.IS_CCST_Match     = X.MatchCnt,
-    Res.IS_CCST_Mismatch  = X.MismatchCnt,
-    Res.IS_CCST_result    = CASE WHEN X.MismatchCnt = 0 THEN 'PASS' ELSE 'FAIL' END
-FROM IntermediateStaging_DEV.[audit].NonFinReconciliationresult AS Res
-INNER JOIN
+CREATE TABLE audit.CCST_VolumeRecon_Landing
 (
-    SELECT Recon_id, Parameter_Name, LOBCode,
-        COUNT(1) AS CCSTCnt,
-        SUM(CASE WHEN IS_CCST_result = 'PASS' THEN 1 ELSE 0 END) AS MatchCnt,
-        SUM(CASE WHEN IS_CCST_result = 'FAIL' THEN 1 ELSE 0 END) AS MismatchCnt
-    FROM #Compared3
-    GROUP BY Recon_id, Parameter_Name, LOBCode
-) AS X
-ON Res.Execution_id   = @Execution_id
-AND Res.Recon_id       = X.Recon_id
-AND Res.Parameter_Name = X.Parameter_Name
-AND Res.LOBCode        = X.LOBCode;
+    Execution_id     BIGINT       NOT NULL,
+    Recon_id         INT          NOT NULL,
+    Parameter_Value  VARCHAR(100) NULL,     -- e.g. 'HOUSEHOLD', 'MOTOR' — must match how ClaimVolumeReconciliationData.Parameter_value is stored
+    CCST_Value       INT          NULL,
+    Created_at       DATETIME     NOT NULL DEFAULT GETDATE()
+);
 
 
-/*============================== Case A: claim now passes IS_CCST, row exists ONLY because of CCST failure → delete entirely ==============================*/
+SELECT (EXECID) AS Execution_id,
+       106 AS Recon_id,
+       CASE
+           WHEN P.PolicyType = 'PHPERSONALHOME' THEN 'HOUSEHOLD'
+           WHEN P.PolicyType = 'PMPERSONALMOTOR' THEN 'MOTOR'
+       END AS Parameter_Value,
+       COUNT(DISTINCT C.PublicID) AS CCST_Value
+FROM gwccdv24.dbo.ccst_claim C
+INNER JOIN gwccdv24.dbo.ccst_policy P ON P.PublicID = C.PolicyID
+WHERE C.PublicID IS NOT NULL
+  AND P.PolicyType IS NOT NULL
+GROUP BY
+    CASE
+        WHEN P.PolicyType = 'PHPERSONALHOME' THEN 'HOUSEHOLD'
+        WHEN P.PolicyType = 'PMPERSONALMOTOR' THEN 'MOTOR'
+    END
 
-DELETE tgt
-FROM IntermediateStaging_DEV.[audit].ClaimNonFinReconciliationData tgt
-INNER JOIN #Compared3 src
-    ON tgt.Execution_id = @Execution_id
-    AND tgt.Recon_id     = src.Recon_id
-    AND tgt.Public_id    = src.Public_id
-WHERE src.IS_CCST_result = 'PASS'
-    AND (tgt.V2_SS_result IS NULL OR tgt.V2_SS_result = 'PASS')
-    AND (tgt.SS_IS_result IS NULL OR tgt.SS_IS_result = 'PASS');
-
-
-/*============================== Case B: claim now passes IS_CCST, but an earlier layer is still genuinely broken → keep row, null out CCST columns ==============================*/
-
-UPDATE tgt
-SET tgt.CCST_value    = NULL,
-    tgt.IS_CCST_result = NULL
-FROM IntermediateStaging_DEV.[audit].ClaimNonFinReconciliationData tgt
-INNER JOIN #Compared3 src
-    ON tgt.Execution_id = @Execution_id
-    AND tgt.Recon_id     = src.Recon_id
-    AND tgt.Public_id    = src.Public_id
-WHERE src.IS_CCST_result = 'PASS'
-    AND (tgt.V2_SS_result = 'FAIL' OR tgt.SS_IS_result = 'FAIL');
+-- Repeat for every other Recon_id block (101–105, etc.) that exists in
+-- ClaimVolumeReconciliationData, using the corresponding gwccdv24 tables/filters
+-- that mirror each block's IS-side logic.
 
 
-/*============================== Case C/D: claim fails IS_CCST — update existing row OR insert fresh, no backfill of earlier layers ==============================*/
+CREATE OR ALTER PROCEDURE audit.usp_VolumeRecon_CCST
+    @Execution_id BIGINT
+AS
+BEGIN
+    SET NOCOUNT ON;
 
-MERGE IntermediateStaging_DEV.[audit].ClaimNonFinReconciliationData AS tgt
-USING (SELECT * FROM #Compared3 WHERE IS_CCST_result = 'FAIL') AS src
+    UPDATE R
+    SET
+        R.CCST_value = X.CCST_Value,
+        R.IS_CCST_result =
+            CASE
+                WHEN R.IS_value IS NULL THEN NULL
+                WHEN R.IS_value = X.CCST_Value THEN 'PASS'
+                ELSE 'FAIL'
+            END
+    FROM audit.CCST_VolumeRecon_Landing X
+    INNER JOIN [audit].ClaimVolumeReconciliationData R
+        ON X.Parameter_Value = UPPER(LTRIM(RTRIM(R.Parameter_value)))
+       AND X.Recon_id = R.Recon_id
+    WHERE R.Execution_id = @Execution_id
+      AND X.Execution_id = @Execution_id
+      AND X.Recon_id = 106;
 
-ON tgt.Execution_id = @Execution_id
-    AND tgt.Recon_id  = src.Recon_id
-    AND tgt.Public_id = src.Public_id
-
-WHEN MATCHED THEN
-    /* Case C: row already exists (failed at an earlier layer) — only touch this layer's columns */
-    UPDATE SET tgt.CCST_value     = src.CCST_Value,
-        tgt.IS_CCST_result        = src.IS_CCST_result
-
-WHEN NOT MATCHED THEN
-    /* Case D: first-time failure, right here at IS_CCST — per your manager's instruction, do NOT backfill
-       V2_value/SS_value/V2_SS_result/SS_Transformed_Value/IS_value/SS_IS_result — leave them NULL */
-    INSERT (
-        Execution_id, Recon_id, Public_id, Claim_Number, LOBCode, Parameter_Name,
-        CCST_value, IS_CCST_result, Created_at
-    )
-    VALUES (
-        @Execution_id, src.Recon_id, src.Public_id, src.Claim_Number, src.LOBCode, src.Parameter_Name,
-        src.CCST_Value, src.IS_CCST_result, GETDATE()
-    );
+    -- Repeat this block (or parameterize by @Recon_id) for every other volume recon check
+END
