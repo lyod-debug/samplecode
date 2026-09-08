@@ -1,495 +1,618 @@
 /* =====================================================================
-   IS_RISKUNIT — target table create script
-   Built from cc_riskunit DDL, scoped to columns actually used by the
-   property/motor risk unit procs (per your note: not every cc_riskunit
-   column is in migration scope).
+   IS_EXPOSURE_MOTOR — v9
+   Only change: removed the dead CMP-86 conditional-Property comment
+   block from Block B - resolved as "use the sheet's unconditional
+   rule" per your tie-break instruction (neither source flags itself
+   as pending). No functional change - the live SQL was already
+   unconditional, only the confusing commented-out alternative and its
+   "open discrepancy" framing are gone.
+   ===================================================================== */
+/* =====================================================================
+   IS_EXPOSURE_MOTOR — v8
+   Real change from v7: Block F's CoverageID join now excludes
+   inclusion-origin IS_COVERAGE rows (VEC_GMP_COVERAGEID IS NOT NULL) -
+   the actual fix for the duplicate-Type risk, not just a deterministic
+   tiebreak. Confirm with BA/senior that inclusions should never be an
+   exposure's PrimaryCoverage (see chat) - reasonably confident but not
+   explicitly confirmed in any doc seen so far.
+   ===================================================================== */
+/* =====================================================================
+   IS_EXPOSURE_MOTOR — v7
+   No changes to any INSERT/UPDATE logic - re-verified against the BA
+   session transcript, everything already built matches what's
+   described there (AD/AD-Van cosmetic equivalence, PA-ancillary+AD
+   interaction, duplicate-AD "no golden rule", Hire&Mobility state
+   logic). Only addition: a dedicated hard-constraint validation query
+   in section 3 for "more than one AD exposure per claim," which the
+   transcript explicitly states must never happen. Open question raised
+   by the transcript (MOTOR_CIRC_LOSSCAUSE_MAPPING.GWCC_Exposure column)
+   is NOT wired into any logic below - unresolved, see chat.
+   ===================================================================== */
+/* =====================================================================
+   IS_EXPOSURE_MOTOR — v6
+   Only real code change from v5: Block F's CoverageID join now goes
+   through a deterministic dedup CTE (ROW_NUMBER by PublicID) as a
+   proactive safeguard against the duplicate-Type scenario discussed in
+   chat. Everything else re-confirmed unchanged - the claimant/incident
+   gaps remain genuinely open pending your senior's proc changes, not
+   something fixable from the exposure side alone.
+   ===================================================================== */
+/* =====================================================================
+   IS_EXPOSURE_MOTOR — v5
+   Re-verified in full against re-supplied LossType/CoverageSubType/
+   IncidentType/ExposureType columns and cardinality sheet - NO logic
+   changes required, LKP_EXPOSURE_MOTOR_RULES confirmed correct row for
+   row. AssignmentStatus 'assigned' kept but still flagged as a
+   same-sheet internal contradiction (Default Value column says
+   'Unassigned') - see chat, needs BA confirmation, not resolved here.
+   AssignedUserID/AssignedGroupID deliberately still not built - needs
+   the V2-to-CC user/group mapping table per CMP-106, doesn't exist yet.
+   Two new validation queries added (coverage duplicate-type check,
+   incident/exposure element-mismatch check) - see section 3.
 
-   TYPE NOTE: cc_riskunit's PolicyID/VehicleID/PolicyLocationID/
-   VehicleLocationID are bigint FKs on the CC side, but in this staging
-   layer they hold PublicID strings (same pattern as every other FK in
-   this pipeline - 'mig:...' style) which the bulk-load utility resolves
-   to the real bigint ID at import time. Same for every *_Adm typelist
-   column: cc_riskunit has these as int, staging holds the GW_TypeCode
-   string. Only RUNumber needs to be a genuine int end to end.
+   Changes from v3 (retained from v4):
+     - Block A: AD dedup now filters CLAIM_REF IS NOT NULL when reading
+       LKP_Dupe_MotorAD (per your investigation - junk/no-claim rows
+       otherwise poison the exclusion logic)
+     - Block F: CoverageID now joins the CONSOLIDATED IS_COVERAGE table,
+       not IS_COVERAGE_MOTOR
+     - Block H: FIXED - was joining VEC_GW_CF_HDR_TYPE on CM.GWCFHDR_TYPEID
+       (a link-type property), should be CM.HDR_TYPE_ID (the actual
+       header-type of this contact) - these are different columns and I
+       had conflated them
+     - Block C: Hire & Mobility payment code list - CONFLICT between your
+       two sources, using the most recently supplied list, flagged inline
    ===================================================================== */
 
 USE [IntermediateStaging_DEV]
 GO
 
-IF OBJECT_ID('dbo.IS_RISKUNIT', 'U') IS NOT NULL
-    DROP TABLE dbo.IS_RISKUNIT;
-GO
+/* =====================================================================
+   0. LOOKUP TABLES (unchanged)
+   ===================================================================== */
+IF OBJECT_ID('dbo.LKP_EXPOSURE_MOTOR_RULES', 'U') IS NOT NULL DROP TABLE dbo.LKP_EXPOSURE_MOTOR_RULES;
+CREATE TABLE dbo.LKP_EXPOSURE_MOTOR_RULES (
+    RuleKey             VARCHAR(50)  NOT NULL PRIMARY KEY,
+    LossType            VARCHAR(20),
+    PolicyType          VARCHAR(50),
+    PrimaryCoverage     VARCHAR(100),
+    CoverageSubType     VARCHAR(100),
+    IncidentType        VARCHAR(50),
+    IncidentCode        VARCHAR(50),
+    LossParty           VARCHAR(20),
+    ExposureType        VARCHAR(50)
+);
+INSERT INTO dbo.LKP_EXPOSURE_MOTOR_RULES VALUES
+('AD_STD',   'Motor','Personal Motor','PMAccidentalDamage_Inc','PMAccidentalDamage_VehicleDamageInc','VehicleIncident','VehicleDamage','insured','VehicleDamage'),
+('AD_VAN',   'Motor','Personal Motor','PMAccidentalDamage_Inc','PMAccidentalDamage_VehicleDamageInc','VehicleIncident','VehicleDamage','insured','VehicleDamage'),
+('AD_THEFT', 'Motor','Personal Motor','PMFireAndTheft_Inc','PMFireAndTheft_VehicleDamageInc','VehicleIncident','VehicleDamage','insured','VehicleDamage'),
+('AD_VAN_THEFT','Motor','Personal Motor','PMFireAndTheft_Inc','PMFireAndTheft_VehicleDamageInc','VehicleIncident','VehicleDamage','insured','VehicleDamage'),
+('TP_VEH',   'Motor','Personal Motor','PMLiability_Inc','PMLiability_TPVehicleDamageInc','VehicleIncident','VehicleDamage','third-party','VehicleDamage'),
+('TP_INJ',   'Motor','Personal Motor','PMLiability_Inc','PMLiabilityInjuredParty_BIInc','InjuryIncident','BodilyInjuryDamage','third-party','BodilyInjuryDamage'),
+('TP_PRO',   'Motor','Personal Motor','PMLiability_Inc','PMLiability_TPPropertyDamageInc','FixedPropertyIncident','PropertyDamage','third-party','PropertyDamage'),
+('TP_HIRE',  'Motor','Personal Motor','PMLiability_Inc','PMLiability_TPHireMobilityVehicleDmgInc','VehicleIncident','VehicleDamage','third-party','VehicleDamage'),
+('PA_STD',   'Motor','Personal Motor','PMPersonalInjuryAncCov','PMPersonalInjury_AncBIInc','InjuryIncident','BodilyInjuryDamage','insured','BodilyInjuryDamage'),
+('PA_PLUS',  'Motor','Personal Motor','PMPersonalInjuryPlusAncCov','PMPersonalInjuryPlus_AncBIInc','InjuryIncident','BodilyInjuryDamage','insured','BodilyInjuryDamage');
 
-CREATE TABLE [dbo].[IS_RISKUNIT](
-    [PublicID]                      VARCHAR(64)   NOT NULL,   -- mandatory on cc_riskunit
-    [RUNumber]                      INT           NOT NULL,   -- mandatory, must be a real int (see fix below)
-    [PolicyID]                      VARCHAR(64)   NOT NULL,   -- mandatory FK -> must equal IS_POLICY.PublicID
-    [PolicyLocationID]              VARCHAR(64)   NULL,
-    [CoverableType_Adm]             VARCHAR(100)  NOT NULL,   -- mandatory on cc_riskunit
-    [Subtype]                       VARCHAR(50)   NOT NULL,   -- 'PropertyRU' / 'VehicleRU'
-    [SubPolicyID_Adm]               VARCHAR(100)  NULL,
-    [ClaimsRiskType_Adm]            VARCHAR(100)  NULL,
-    [CoverType_Adm]                 VARCHAR(100)  NULL,
-    [CriminalConvictions_Adm]       BIT           NULL,
-    [TierType_Adm]                  VARCHAR(100)  NULL,
+IF OBJECT_ID('dbo.LKP_EXPOSURE_CLAIM_EXCEPTIONS', 'U') IS NOT NULL DROP TABLE dbo.LKP_EXPOSURE_CLAIM_EXCEPTIONS;
+CREATE TABLE dbo.LKP_EXPOSURE_CLAIM_EXCEPTIONS (
+    CLAIM_REF       VARCHAR(50) NOT NULL,
+    ExceptionType   VARCHAR(50) NOT NULL,
+    PRIMARY KEY (CLAIM_REF, ExceptionType)
+);
+INSERT INTO dbo.LKP_EXPOSURE_CLAIM_EXCEPTIONS VALUES
+('1113847462', 'VANDAL_CREATE_TP'),
+('1114562093', 'THEFT_NO_TRANS_CREATE_TP'),
+('1112396310', 'THEFT_WITH_TRANS_SUPPRESS_TP'),
+('1115235695', 'THEFT_WITH_TRANS_SUPPRESS_TP');
 
-    -- property-only
-    [AlarmType_Adm]                 VARCHAR(100)  NULL,
-    [AnySmokers_Adm]                BIT           NULL,
-    [Bankruptcy_Adm]                BIT           NULL,
-    [Bedsit_Adm]                    BIT           NULL,
-    [BuildingWorkInProgress_Adm]    BIT           NULL,
-    [CentralHeating_Adm]            VARCHAR(100)  NULL,
-    [CurrentlyOccProperty_Adm]      BIT           NULL,
-    [DaysUnoccupied_Adm]            INT           NULL,
-    [Description]                   VARCHAR(255)  NULL,
-    [FlatRoofPercentage_Adm]        VARCHAR(100)  NULL,
-    [FloodHistoryValues_Adm]        VARCHAR(100)  NULL,
-    [FloodReID_Adm]                 VARCHAR(64)   NULL,
-    [GarageOrOutBldng_Adm]          VARCHAR(100)  NULL,
-    [GoodStateOfRepair_Adm]         BIT           NULL,
-    [HowYouPay_Adm]                 VARCHAR(100)  NULL,
-    [ListedBuilding_Adm]            VARCHAR(100)  NULL,
-    [MonthlyRentalAmount_Adm]       DECIMAL(18,2) NULL,
-    [NoOfAdults_Adm]                INT           NULL,
-    [NoOfBathrooms_Adm]             INT           NULL,
-    [NoOfBedrooms_Adm]              INT           NULL,
-    [NoOfBedsits_Adm]               INT           NULL,
-    [NoOfChildren_Adm]              INT           NULL,
-    [NoOfLodgers_Adm]               INT           NULL,
-    [NoOfStaff_Adm]                 VARCHAR(100)  NULL,
-    [NoOfTenants_Adm]                INT          NULL,
-    [PermanentResidence_Adm]        VARCHAR(100)  NULL,
-    [PropertyManaged_Adm]           BIT           NULL,
-    [PropertyOccByTen_Adm]          BIT           NULL,
-    [PropertyOwnedDate_Adm]         VARCHAR(19)   NULL,
-    [PropertyStyle_Adm]             VARCHAR(100)  NULL,
-    [PropertyType_Adm]              VARCHAR(100)  NULL,
-    [PropertyUse_Adm]               VARCHAR(100)  NULL,
-    [PropOccupiedbyTenants_Adm]     BIT           NULL,
-    [PropUsedFor_Adm]               VARCHAR(100)  NULL,
-    [PropUsedForCommIns_Adm]        BIT           NULL,
-    [PropUsedForType_Adm]           VARCHAR(100)  NULL,
-    [RenovationCost_Adm]            VARCHAR(19)   NULL,
-    [RenovationEndDate_Adm]         VARCHAR(19)   NULL,
-    [RenovationStartDate_Adm]       VARCHAR(19)   NULL,
-    [RenovationType_Adm]            VARCHAR(100)  NULL,
-    [RoofType_Adm]                  VARCHAR(100)  NULL,
-    [SolarPanels_Adm]               VARCHAR(100)  NULL,
-    [SpecialTerms_Adm]              BIT           NULL,
-    [StartDateBuildings_Adm]        DATETIME2(7)  NULL,
-    [StartDateContents_Adm]         DATETIME2(7)  NULL,
-    [Sublet_Adm]                    BIT           NULL,
-    [TenancyAgreeInPlc_Adm]         BIT           NULL,
-    [TenancyAgreement_Adm]          VARCHAR(100)  NULL,
-    [TenantReferenceChecked_Adm]    BIT           NULL,
-    [TenantTheft_Adm]               BIT           NULL,
-    [ThatchCondition_Adm]           VARCHAR(100)  NULL,
-    [Trees_Adm]                     BIT           NULL,
-    [Underpined_Adm]                BIT           NULL,
-    [UnoccupiedReason_Adm]          VARCHAR(100)  NULL,
-    [ValueOfStock_Adm]              DECIMAL(18,2) NULL,
-    [WallType_Adm]                  VARCHAR(100)  NULL,
-    [WatercourseProxy_Adm]          VARCHAR(100)  NULL,
-    [WhoIsCovered_Adm]              VARCHAR(100)  NULL,
-    [YearBuilt_Adm]                 DATETIME2(7)  NULL,
+IF OBJECT_ID('dbo.LKP_TP_CLAIMANT_TYPE', 'U') IS NOT NULL DROP TABLE dbo.LKP_TP_CLAIMANT_TYPE;
+CREATE TABLE dbo.LKP_TP_CLAIMANT_TYPE (
+    VectusDisplayString    VARCHAR(100) NOT NULL PRIMARY KEY,
+    CC_ClaimantType_Code   VARCHAR(50)  NOT NULL
+);
+INSERT INTO dbo.LKP_TP_CLAIMANT_TYPE VALUES
+('TP Vehicle Owner',        'veh_other_owner'),
+('Registered Keeper',       'veh_other_owner'),
+('TP Driver & Owner',       'veh_other_driver'),
+('TP Driver',               'veh_other_driver'),
+('TP Driver (DOC)',         'veh_other_driver'),
+('TP Driver (Thief)',       'veh_other_driver'),
+('PH Passenger',            'veh_ins_occupant'),
+('TP Passenger',            'veh_other_occ'),
+('Adult Pedestrian',        'bystander'),
+('Child Pedestrian',        'bystander'),
+('Adult Cyclist',           'cyclist'),
+('Child Cyclist',           'cyclist'),
+('Motorcyclist',            'motorcyclist'),
+('TP Property Owner',       'propertyowner'),
+('Pillion Passenger',       'other'),
+('Company',                 'other'),
+('Secondary Victim',        'other');
 
-    -- motor-only
-    [CourtesyCar_Adm]               BIT           NULL,
-    [CubicCapacity_Adm]             VARCHAR(100)  NULL,
-    [EffectiveDate_Adm]             DATE          NULL,
-    [ExpirationDate_Adm]            VARCHAR(19)   NULL,
-    [NotOnCover_Adm]                BIT           NULL,
-    [RegisteredOwnerName_Adm]       VARCHAR(1333) NULL,
-    [SecurityFeatures_Adm]          VARCHAR(100)  NULL,
-    [SignWriting_Adm]               VARCHAR(1333) NULL,
-    [TempAddedExpDate_Adm]          VARCHAR(19)   NULL,
-    [TempAdded_Adm]                 BIT           NULL,
-    [TempAddedReason_Adm]           VARCHAR(100)  NULL,
-    [TelematicsStdDis_Adm]          VARCHAR(100)  NULL,
-    [TelematicsFlag_Adm]            BIT           NULL,
-    [TelematicsInstallationDate_Adm] VARCHAR(19)  NULL,
-    [TelematicsProduct_Adm]         VARCHAR(100)  NULL,
-    [VehicleLocationID]             VARCHAR(64)   NULL,
-    [TelematicsStatus_Adm]          VARCHAR(100)  NULL,
-    [Transmission_Adm]              VARCHAR(30)   NULL,
-    [VehicleID]                     VARCHAR(64)   NULL,
-    [VehicleOwner_Adm]              BIT           NULL,
-    [VehicleOwnerName_Adm]          VARCHAR(1333) NULL,
 
-    -- staging-only helper (dropped/ignored by the loader, used for this
-    -- proc's own join back to CLAIM_MASTER; keep off the CCST copy)
-    [CLAIM_REF]                     VARCHAR(50)   NULL,
+/* =====================================================================
+   1. CREATE TABLE (unchanged)
+   ===================================================================== */
+IF OBJECT_ID('dbo.IS_EXPOSURE_MOTOR', 'U') IS NOT NULL DROP TABLE dbo.IS_EXPOSURE_MOTOR;
+CREATE TABLE dbo.IS_EXPOSURE_MOTOR (
+    PublicID                    VARCHAR(100) NOT NULL PRIMARY KEY,
+    ClaimID                     VARCHAR(64)  NOT NULL,
+    VectusCaseID_Adm            VARCHAR(64)  NULL,
+    GW_HDR_CASEID                BIGINT       NULL,
+    SourceOrigin_Adm            VARCHAR(20)  NULL,
 
-    CONSTRAINT [IS_RISKUNIT_PK] PRIMARY KEY CLUSTERED ([PublicID] ASC)
+    ExposureType                VARCHAR(100) NOT NULL,
+    PrimaryCoverage             VARCHAR(100) NOT NULL,
+    CoverageSubType             VARCHAR(100) NULL,
+    LossParty                   VARCHAR(20)  NULL,
+    ClaimOrder                  INT          NOT NULL,
+
+    CoverageID                  VARCHAR(100) NULL,
+    IncidentID                  VARCHAR(100) NULL,
+    ClaimantDenormID            VARCHAR(100) NULL,
+    ClaimantType                VARCHAR(100) NULL,
+
+    AssignmentStatus            VARCHAR(50)  NOT NULL DEFAULT 'unassigned',
+    BIReservePercentage_Adm     DECIMAL(5,2) NOT NULL DEFAULT 100,
+    RIGroupSetExternally        BIT          NOT NULL DEFAULT 0,
+    State                       VARCHAR(50)  NOT NULL DEFAULT 'draft',
+    SupplementalWorkloadWeight  INT          NOT NULL DEFAULT 0,
+    WorkloadWeight              INT          NOT NULL DEFAULT 0,
+    CreatedVia                  VARCHAR(50)  NULL DEFAULT 'manual',
+    Strategy                    VARCHAR(50)  NULL DEFAULT 'unknown',
+    ValidationLevel             VARCHAR(50)  NULL DEFAULT 'newloss',
+
+    BIClaimLife_Adm              INT          NULL,
+    BIYearsToIssue_Adm           INT          NULL,
+    LiabilityPosition_Adm        VARCHAR(100) NULL,
+
+    CILFigure_Adm                DECIMAL(18,2) NULL,
+    CILNotes_Adm                 VARCHAR(50)   NULL,
+
+    CreateTime                   DATETIME2(7)  NOT NULL,
+    CloseDate                    DATETIME2(7)  NULL,
+
+    AssignedUserID               VARCHAR(100) NULL,
+    AssignedGroupID              VARCHAR(100) NULL,
+
+    CLAIM_REF                    VARCHAR(50)  NULL
 );
 GO
 
 
 /* =====================================================================
-   PROC 1: usp_Load_IS_PROPERTY_RISKUNIT_HOUSEHOLD
-   Fixes vs your senior's version:
-     - PolicyID now = CLM.PUBLICID (matches IS_POLICY.PublicID for FK
-       resolution) instead of the raw source POLICY_ID
-     - RUNumber now a real sequential int (was RSK.PUBLICID, a string)
-     - CoverableType_Adm added (was entirely missing - NOT NULL on cc)
-     - RiskUnitPublicID: deterministic composite ID, not ROW_NUMBER()
-     - FloodReID_Adm cast to varchar(64) to match DDL
+   2. STORED PROC
    ===================================================================== */
-USE [IntermediateStaging_DEV]
-GO
-CREATE OR ALTER PROCEDURE [dbo].[usp_Load_IS_PROPERTY_RISKUNIT_HOUSEHOLD]
+CREATE OR ALTER PROCEDURE [dbo].[usp_Load_IS_EXPOSURE_MOTOR]
 AS
 BEGIN
-TRUNCATE TABLE [IntermediateStaging_DEV].[dbo].[IS_PROPERTY_RISKUNIT_HOUSEHOLD];
 
-INSERT INTO [IntermediateStaging_DEV].[dbo].[IS_PROPERTY_RISKUNIT_HOUSEHOLD]
-(
-    CLAIM_REF, RiskUnitPublicID, RUNumber, PolicyID, PolicyLocationID,
-    CoverableType_Adm, CoverType_Adm, ClaimsRiskType_Adm, CriminalConvictions_Adm, TierType_Adm,
-    AlarmType_Adm,AnySmokers_Adm,Bankruptcy_Adm,Bedsit_Adm,BuildingWorkInProgress_Adm,
-    CentralHeating_Adm,CurrentlyOccProperty_Adm,DaysUnoccupied_Adm,Description,
-    FlatRoofPercentage_Adm,FloodHistoryValues_Adm,FloodReID_Adm,GarageOrOutBldng_Adm,
-    GoodStateOfRepair_Adm,HowYouPay_Adm,ListedBuilding_Adm,MonthlyRentalAmount_Adm,
-    NoOfAdults_Adm,NoOfBathrooms_Adm,NoOfBedrooms_Adm,NoOfBedsits_Adm,NoOfChildren_Adm,
-    NoOfLodgers_Adm,NoOfStaff_Adm,NoOfTenants_Adm,PermanentResidence_Adm,PropertyManaged_Adm,
-    PropertyOccByTen_Adm,PropertyOwnedDate_Adm,PropertyStyle_Adm,PropertyType_Adm,PropertyUse_Adm,
-    PropOccupiedbyTenants_Adm,PropUsedFor_Adm,PropUsedForCommIns_Adm,PropUsedForType_Adm,
-    RenovationCost_Adm,RenovationEndDate_Adm,RenovationStartDate_Adm,RenovationType_Adm,
-    RoofType_Adm,SolarPanels_Adm,SpecialTerms_Adm,StartDateBuildings_Adm,StartDateContents_Adm,
-    Sublet_Adm,SubPolicyID_Adm,TenancyAgreeInPlc_Adm,TenancyAgreement_Adm,TenantReferenceChecked_Adm,
-    TenantTheft_Adm,ThatchCondition_Adm,Trees_Adm,Underpined_Adm,UnoccupiedReason_Adm,
-    ValueOfStock_Adm,WallType_Adm,WatercourseProxy_Adm,WhoIsCovered_Adm,YearBuilt_Adm
+TRUNCATE TABLE IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR;
+
+/* --------------------------------------------------------------
+   BLOCK A: 1st Party AD Vehicle Exposures
+   FIXED: CLAIM_REF IS NOT NULL added to the LKP_Dupe_MotorAD check.
+   STILL EXCLUDES 'Migrate-group' entirely - open BA question.
+   -------------------------------------------------------------- */
+;WITH AD_ELIGIBLE AS (
+    SELECT AD.ID, AD.GW_HDR_CASEID
+    FROM SourceStaging.VECCASRN.VEC_GW_MOTOR_AD AD
+    WHERE NOT EXISTS (
+        SELECT 1 FROM SourceStaging.dbo.LKP_Dupe_MotorAD DUPE
+        WHERE DUPE.CLAIM_REF IS NOT NULL
+          AND (DUPE.Solution LIKE 'Descope%' OR DUPE.Solution LIKE 'Migrate-group%')
+          AND AD.ID = DUPE.GW_MOTOR_AD_ID
+    )
+),
+AD_CANDIDATES AS (
+    SELECT
+        CLM.CLAIM_REF, CLM.PUBLICID AS ClaimPublicID, CLM.GW_HDR_CASEID,
+        AD.ID AS AD_ID, CIRC.GW_CIRCS_TYPID, RSK.COVERABLE_TYPE
+    FROM IntermediateStaging_DEV.dbo.IS_CLAIM_MASTER CLM
+    INNER JOIN AD_ELIGIBLE AD ON AD.GW_HDR_CASEID = CLM.GW_HDR_CASEID
+    INNER JOIN SourceStaging.VECCASRN.VEC_GW_VEHICLE VEH ON VEH.CASEID = AD.GW_HDR_CASEID
+    LEFT JOIN SourceStaging.VECCASRN.VEC_GW_CIRCS_INC CIRC
+        ON CIRC.GW_HDR_CASEID = CLM.GW_HDR_CASEID AND CIRC.GCURRENT = 'X'
+    INNER JOIN SourceStaging.VECCASRN.VEC_GWP_SLCTD_RISK SR ON SR.GW_HDR_CASEID = CLM.GW_HDR_CASEID
+    INNER JOIN SourceStaging.VECCASRN.VEC_GWP_RISKUNIT RSK ON RSK.GWP_POLICYID = SR.GWP_POLICYID AND RSK.PUBLICID = SR.PUBLICID
+    WHERE UPPER(LTRIM(RTRIM(CLM.PRODUCT))) = 'MOTOR'
+      AND NOT (RSK.COVER_TYPE = 'tpo')
+      AND NOT (RSK.COVER_TYPE = 'tpft' AND COALESCE(CIRC.GW_CIRCS_TYPID, 0) <> 5)
 )
+INSERT INTO IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR
+(PublicID, ClaimID, VectusCaseID_Adm, GW_HDR_CASEID, SourceOrigin_Adm, ExposureType, PrimaryCoverage,
+ CoverageSubType, LossParty, ClaimOrder, CreateTime, CLAIM_REF, ClaimantType)
 SELECT
-    CLM.CLAIM_REF,
-    /* deterministic PublicID, not ROW_NUMBER() */
-    'mig:propriskunit' + CONVERT(VARCHAR(64), CLM.ID) + '_' + CONVERT(VARCHAR(64), SR.ID),
-    /* RUNumber: real sequential int per policy, RSK.PUBLICID is a string - never put that here */
-    ROW_NUMBER() OVER (PARTITION BY SR.GWP_POLICYID ORDER BY RSK.ID),
-    /* PolicyID: FIX - must equal IS_POLICY.PublicID, not raw source POLICY_ID */
-    CLM.PUBLICID,
-    RSK.GWP_LOCATIONID,
-    /* CoverableType_Adm: FIX - was missing entirely, NOT NULL on cc_riskunit */
-    CVBT.GW_TypeCode,
-    TL_COVERTYPE.GW_TypeCode,
-    TL_CLAIMSRISK.GW_TypeCode,
-    CASE WHEN RSK.CONVICTIONS='Y' THEN 1 WHEN RSK.CONVICTIONS='N' THEN 0 ELSE NULL END,
-    TL_TIERTYPE.GW_TypeCode,
-    TL_ALARM.GW_TypeCode,
-    CASE WHEN DWL.SMOKE='Y' THEN 1 WHEN DWL.SMOKE='N' THEN 0 ELSE NULL END,
-    CASE WHEN DWL.BANKRUPT='Y' THEN 1 WHEN DWL.BANKRUPT='N' THEN 0 ELSE NULL END,
-    CASE WHEN LORD.BEDSIT='Y' THEN 1 WHEN LORD.BEDSIT='N' THEN 0 ELSE NULL END,
-    CASE WHEN DWL.BUILD_WORK='Y' THEN 1 WHEN DWL.BUILD_WORK='N' THEN 0 ELSE NULL END,
-    TL_CENTHEAT.GW_TypeCode,
-    CASE WHEN DWL.UNOCCUPIED='N' THEN 1 WHEN DWL.UNOCCUPIED='Y' THEN 0 ELSE NULL END,
-    DWL.NO_UNNOC,
-    CONCAT(
-        LEFT(ISNULL(LTRIM(RTRIM(LOC.ADDRESS1)), ''), 60), ',',
-        LEFT(ISNULL(LTRIM(RTRIM(LOC.ADDRESS2)), ''), 60), ',',
-        LEFT(ISNULL(LTRIM(RTRIM(LOC.ADDRESS3)), ''), 60), ',',
-        ISNULL(LTRIM(RTRIM(LOC.CITY)), ''), ',',
-        ISNULL(LTRIM(RTRIM(LOC.POSTCODE)), ''), ',',
-        ISNULL(LTRIM(RTRIM(LOC.COUNTRY)), '')
-    ),
-    TL_FLATROOF.GW_TypeCode,
-    TL_FLOODHISTORY.GW_TypeCode,
-    CONVERT(VARCHAR(64), DWL.FRID),      -- FloodReID_Adm: cast to match varchar(64) DDL
-    TL_GARAGE.GW_TypeCode,
-    CASE WHEN DWL.STATE_OF_REP='Y' THEN 1 WHEN DWL.STATE_OF_REP='N' THEN 0 ELSE NULL END,
-    TL_PAYFREQ.GW_TypeCode,
-    TL_LISTEDBUILDING.GW_TypeCode,
-    LORD.MONTHLY_RENT,
-    DWL.ADULTS, DWL.BATH_ROOMS, DWL.BED_ROOMS, LORD.NO_OF_BEDSITS, DWL.CHILDREN,
-    DWL.LODGERS, TL_STAFF.GW_TypeCode, LORD.NO_OF_TENANTS, TL_OCCUPYHOME.GW_TypeCode,
-    CASE WHEN LORD.PROP_MANAGED='Y' THEN 1 WHEN LORD.PROP_MANAGED='N' THEN 0 ELSE NULL END,
-    CASE WHEN DWL.CURR_TENANTS='Y' THEN 1 WHEN DWL.CURR_TENANTS='N' THEN 0 ELSE NULL END,
-    CONVERT(varchar(19), LORD.PROP_OWN_DATE, 120),
-    TL_PROPERTYSTYLE.GW_TypeCode, TL_PROPERTYTYPE.GW_TypeCode, TL_PROPERTYUSE.GW_TypeCode,
-    CASE WHEN DWL.CURR_TENANTS='Y' THEN 1 WHEN DWL.CURR_TENANTS='N' THEN 0 ELSE NULL END,
-    TL_CLERICALBUSINESSUSE.GW_TypeCode,
-    CASE WHEN DWL.BIZ_COM_INS='Y' THEN 1 WHEN DWL.BIZ_COM_INS='N' THEN 0 ELSE NULL END,
-    TL_BUSINESSTYPE.GW_TypeCode,
-    CONVERT(varchar(19), DWL.RENOV_COST, 120),
-    CONVERT(varchar(19), DWL.RENOV_END, 120),
-    CONVERT(varchar(19), DWL.RENOV_START, 120),
-    TL_RENOVATIONTYPE.GW_TypeCode, TL_ROOFTYPE.GW_TypeCode, TL_SOLARPANELS.GW_TypeCode,
-    CASE WHEN DWL.SPEC_TERMS='Y' THEN 1 WHEN DWL.SPEC_TERMS='N' THEN 0 ELSE NULL END,
-    POL.EffectiveDate, POL.EffectiveDate,
-    CASE WHEN DWL.SUB_LET='Y' THEN 1 WHEN DWL.SUB_LET='N' THEN 0 ELSE NULL END,
-    SR.SUB_POLICYID,
-    CASE WHEN DWL.TENANCY_AGR='Y' THEN 1 WHEN DWL.TENANCY_AGR='N' THEN 0 ELSE NULL END,
-    TL_TENANCYAGREEMENT.GW_TypeCode,
-    CASE WHEN LORD.TENANT_REF_CHK='Y' THEN 1 WHEN LORD.TENANT_REF_CHK='N' THEN 0 ELSE NULL END,
-    CASE WHEN LORD.TENANT_THEFT='Y' THEN 1 WHEN LORD.TENANT_THEFT='N' THEN 0 ELSE NULL END,
-    TL_THATCHCONDITION.GW_TypeCode,
-    CASE WHEN DWL.TREES='Y' THEN 1 WHEN DWL.TREES='N' THEN 0 ELSE NULL END,
-    CASE WHEN DWL.UNDERPINNED='Y' THEN 1 WHEN DWL.UNDERPINNED='N' THEN 0 ELSE NULL END,
-    TL_UNOCCUPIEDREASON.GW_TypeCode,
-    DWL.VALUE_STOCK,
-    TL_WALLTYPE.GW_TypeCode, TL_WATERCOURSEPROX.GW_TypeCode, TL_WHOLIVESINPROP.GW_TypeCode,
-    DWL.PROP_BLD_DATE
-FROM IntermediateStaging_DEV.dbo.IS_CLAIM_MASTER CLM
-INNER JOIN IntermediateStaging_DEV.dbo.IS_POLICY POL ON POL.PublicID = CLM.PUBLICID
-INNER JOIN SourceStaging.VECCASRN.VEC_GWP_SLCTD_RISK SR ON CLM.GW_HDR_CASEID = SR.GW_HDR_CASEID
-INNER JOIN SourceStaging.VECCASRN.VEC_GWP_RISKUNIT RSK ON RSK.GWP_POLICYID = SR.GWP_POLICYID AND RSK.PUBLICID = SR.PUBLICID
-LEFT JOIN SourceStaging.VECCASRN.VEC_GWP_LOCATION LOC ON LOC.ID = RSK.GWP_LOCATIONID
-INNER JOIN SourceStaging.VECCASRN.VEC_GWP_DWELLING DWL ON DWL.GWP_RISKUNITID = RSK.ID
-LEFT JOIN SourceStaging.VECCASRN.VEC_GWP_DWEL_LLORD LORD ON LORD.GWP_DWELLINGID = DWL.ID
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING CVBT ON CVBT.Vectus_TypeCode=RSK.COVERABLE_TYPE AND CVBT.TypeList_Name='CoverableType_Adm'
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_ALARM ON TL_ALARM.Vectus_TypeCode=DWL.ALARM_DESC AND TL_ALARM.TypeList_Name='PHAlarmType_Adm'
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_CENTHEAT ON TL_CENTHEAT.Vectus_TypeCode=DWL.CENT_HEAT AND TL_CENTHEAT.TypeList_Name='PHCentralHeatingType_Adm'
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_CLAIMSRISK ON TL_CLAIMSRISK.TypeList_Name='ClaimsRiskType_Adm' AND TL_CLAIMSRISK.Vectus_TypeCode=RSK.RISK_TYPE
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_COVERTYPE ON TL_COVERTYPE.TypeList_Name='CoverType_Adm' AND TL_COVERTYPE.Vectus_TypeCode=RSK.COVER_TYPE
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_FLATROOF ON TL_FLATROOF.TypeList_Name='PHFlatRoof_Adm' AND TL_FLATROOF.Vectus_TypeCode=DWL.ROOF_FLAT_PERC
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_FLOODHISTORY ON TL_FLOODHISTORY.TypeList_Name='PHFloodHistory_Adm' AND TL_FLOODHISTORY.Vectus_TypeCode=DWL.FLOOD_DESC
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_GARAGE ON TL_GARAGE.TypeList_Name='GarageOrOutBldng_Adm' AND TL_GARAGE.Vectus_TypeCode=DWL.GARAGE
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_PAYFREQ ON TL_PAYFREQ.TypeList_Name='PayFreq_Adm' AND TL_PAYFREQ.Vectus_TypeCode=DWL.USUALLY_PAY
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_LISTEDBUILDING ON TL_LISTEDBUILDING.TypeList_Name='PHListedBuilding_Adm' AND TL_LISTEDBUILDING.Vectus_TypeCode=DWL.LISTED
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_STAFF ON TL_STAFF.Vectus_TypeCode=DWL.NO_OF_STAFF AND TL_STAFF.TypeList_Name='Staff_Adm'
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_OCCUPYHOME ON TL_OCCUPYHOME.TypeList_Name='OccupyHome_Adm' AND TL_OCCUPYHOME.Vectus_TypeCode=DWL.PERM_RES
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_PROPERTYSTYLE ON TL_PROPERTYSTYLE.TypeList_Name='PropertyStyle_Adm' AND TL_PROPERTYSTYLE.Vectus_TypeCode=DWL.PROP_STYLE
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_PROPERTYTYPE ON TL_PROPERTYTYPE.TypeList_Name='PropertyType_Adm' AND TL_PROPERTYTYPE.Vectus_TypeCode=DWL.PROP_TYPE
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_PROPERTYUSE ON TL_PROPERTYUSE.TypeList_Name='PropertyUse_Adm' AND TL_PROPERTYUSE.Vectus_TypeCode=DWL.PROP_TYPE
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_CLERICALBUSINESSUSE ON TL_CLERICALBUSINESSUSE.TypeList_Name='ClericalBusinessuse_Adm' AND TL_CLERICALBUSINESSUSE.Vectus_TypeCode=DWL.BUSINESS_DESC
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_BUSINESSTYPE ON TL_BUSINESSTYPE.TypeList_Name='BusinessType_Adm' AND TL_BUSINESSTYPE.Vectus_TypeCode=DWL.BIZ_WORK_TYPE
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_RENOVATIONTYPE ON TL_RENOVATIONTYPE.TypeList_Name='RenovationType_Adm' AND TL_RENOVATIONTYPE.Vectus_TypeCode=DWL.RENOV_TYPEDESC
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_ROOFTYPE ON TL_ROOFTYPE.TypeList_Name='PHRoofType_Adm' AND TL_ROOFTYPE.Vectus_TypeCode=DWL.ROOF_TYPE
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_SOLARPANELS ON TL_SOLARPANELS.TypeList_Name='PHSolarpanels_Adm' AND TL_SOLARPANELS.Vectus_TypeCode=DWL.SOLAR
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_TENANCYAGREEMENT ON TL_TENANCYAGREEMENT.TypeList_Name='TenancyAgreement_Adm' AND TL_TENANCYAGREEMENT.Vectus_TypeCode=LORD.TENANCY_CODE
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_THATCHCONDITION ON TL_THATCHCONDITION.TypeList_Name='PHThatch_Adm' AND TL_THATCHCONDITION.Vectus_TypeCode=DWL.THATCH_COND
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_TIERTYPE ON TL_TIERTYPE.TypeList_Name='TierType_Adm' AND TL_TIERTYPE.Vectus_TypeCode=RSK.TIER
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_UNOCCUPIEDREASON ON TL_UNOCCUPIEDREASON.TypeList_Name='UnOccupiedReason_Adm' AND TL_UNOCCUPIEDREASON.Vectus_TypeCode=DWL.UNOCCU_DESC
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_WALLTYPE ON TL_WALLTYPE.TypeList_Name='PHWallType_Adm' AND TL_WALLTYPE.Vectus_TypeCode=DWL.WALLS_TYPE
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_WATERCOURSEPROX ON TL_WATERCOURSEPROX.TypeList_Name='PHWatercourseProx_Adm' AND TL_WATERCOURSEPROX.Vectus_TypeCode=DWL.WATER_COURSE
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_WHOLIVESINPROP ON TL_WHOLIVESINPROP.TypeList_Name='WhoLivesInProp_Adm' AND TL_WHOLIVESINPROP.Vectus_TypeCode=DWL.WHO_COVERED
-WHERE UPPER(LTRIM(RTRIM(CLM.PRODUCT))) = 'HOUSEHOLD';
+    'mig:exp:ad:' + AC.ClaimPublicID + '_' + CONVERT(VARCHAR(64), AC.AD_ID),
+    AC.ClaimPublicID, CONVERT(VARCHAR(64), AC.AD_ID), AC.GW_HDR_CASEID, 'AD',
+    R.ExposureType, R.PrimaryCoverage, R.CoverageSubType, R.LossParty,
+    0,
+    (SELECT CONVERT(DATETIME2(7), CONCAT(VC.CREATE_DATE, ' ', VC.CREATE_TIME))
+     FROM SourceStaging.VECCASRN.VEC_CASE VC WHERE VC.ID = AC.AD_ID),
+    AC.CLAIM_REF, 'insured'
+FROM AD_CANDIDATES AC
+INNER JOIN dbo.LKP_EXPOSURE_MOTOR_RULES R ON R.RuleKey =
+    CASE
+        WHEN AC.COVERABLE_TYPE = 'PMVan' AND AC.GW_CIRCS_TYPID = 5 THEN 'AD_VAN_THEFT'
+        WHEN AC.COVERABLE_TYPE = 'PMVan' THEN 'AD_VAN'
+        WHEN AC.GW_CIRCS_TYPID = 5 THEN 'AD_THEFT'
+        ELSE 'AD_STD'
+    END;
+
+
+/* --------------------------------------------------------------
+   BLOCK B: 3rd Party Exposures (Vehicle / Injury / Property)
+   -------------------------------------------------------------- */
+;WITH TP_BASE AS (
+    SELECT
+        CLM.CLAIM_REF, CLM.PUBLICID AS ClaimPublicID, CLM.GW_HDR_CASEID, TP.ID AS TP_ID,
+        TPS.VEHICLE, TPS.INJURY, TPS.PROPERTY, TPTYPE.DISPLAY_STRING AS ClaimantRoleDesc
+    FROM IntermediateStaging_DEV.dbo.IS_CLAIM_MASTER CLM
+    INNER JOIN SourceStaging.VECCASRN.VEC_GW_MOTOR_TP TP ON TP.GW_HDR_CASEID = CLM.GW_HDR_CASEID
+    LEFT JOIN SourceStaging.VECCASRN.VEC_GW_TP_SUMMARY TPS ON TPS.CASEID = TP.ID
+    LEFT JOIN SourceStaging.VECCASRN.VEC_GW_TPTYPE TPTYPE ON TPTYPE.ID = TPS.GW_TP_TYPEID
+    WHERE UPPER(LTRIM(RTRIM(CLM.PRODUCT))) = 'MOTOR'
+      AND NOT (TPTYPE.DISPLAY_STRING = 'Alleged Vandal'
+               AND NOT EXISTS (SELECT 1 FROM dbo.LKP_EXPOSURE_CLAIM_EXCEPTIONS E WHERE E.CLAIM_REF = CLM.CLAIM_REF AND E.ExceptionType = 'VANDAL_CREATE_TP'))
+      AND NOT (TPTYPE.DISPLAY_STRING = 'TP Driver (Thief)'
+               AND NOT EXISTS (SELECT 1 FROM SourceStaging.VECCASRN.VEC_GW_PAY_TRANS PT WHERE PT.GW_HDR_CASEID = CLM.GW_HDR_CASEID)
+               AND NOT EXISTS (SELECT 1 FROM dbo.LKP_EXPOSURE_CLAIM_EXCEPTIONS E WHERE E.CLAIM_REF = CLM.CLAIM_REF AND E.ExceptionType = 'THEFT_NO_TRANS_CREATE_TP'))
+      AND NOT (TPTYPE.DISPLAY_STRING = 'TP Driver (Thief)'
+               AND EXISTS (SELECT 1 FROM SourceStaging.VECCASRN.VEC_GW_PAY_TRANS PT WHERE PT.GW_HDR_CASEID = CLM.GW_HDR_CASEID)
+               AND EXISTS (SELECT 1 FROM dbo.LKP_EXPOSURE_CLAIM_EXCEPTIONS E WHERE E.CLAIM_REF = CLM.CLAIM_REF AND E.ExceptionType = 'THEFT_WITH_TRANS_SUPPRESS_TP'))
+),
+TP_ELEMENTS AS (
+    -- RESOLVED: the VEH/PRO combo question is settled per the mapping
+    -- sheet's unconditional rule (no "still pending" marker found on
+    -- either the sheet or CMP-86's own "Sign-Off" doc, so the sheet
+    -- wins per your instruction). CMP-86's conditional Property
+    -- restriction was never actually live in this code and has been
+    -- removed rather than left as a confusing dead alternative.
+    SELECT CLAIM_REF, ClaimPublicID, GW_HDR_CASEID, TP_ID, ClaimantRoleDesc, 'TP_VEH' AS RuleKey, 'VEH' AS ElementTag
+    FROM TP_BASE
+    WHERE VEHICLE = 'X'
+       OR (COALESCE(VEHICLE,'') <> 'X' AND COALESCE(INJURY,'') <> 'X' AND COALESCE(PROPERTY,'') <> 'X')
+    UNION ALL
+    SELECT CLAIM_REF, ClaimPublicID, GW_HDR_CASEID, TP_ID, ClaimantRoleDesc, 'TP_INJ', 'INJ'
+    FROM TP_BASE WHERE INJURY = 'X'
+    UNION ALL
+    SELECT CLAIM_REF, ClaimPublicID, GW_HDR_CASEID, TP_ID, ClaimantRoleDesc, 'TP_PRO', 'PRO'
+    FROM TP_BASE WHERE PROPERTY = 'X'
+)
+INSERT INTO IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR
+(PublicID, ClaimID, VectusCaseID_Adm, GW_HDR_CASEID, SourceOrigin_Adm, ExposureType, PrimaryCoverage,
+ CoverageSubType, LossParty, ClaimOrder, CreateTime, CLAIM_REF, ClaimantType)
+SELECT
+    'mig:exp:tp' + LOWER(TE.ElementTag) + ':' + TE.ClaimPublicID + '_' + CONVERT(VARCHAR(64), TE.TP_ID),
+    TE.ClaimPublicID, CONVERT(VARCHAR(64), TE.TP_ID), TE.GW_HDR_CASEID, TE.RuleKey,
+    R.ExposureType, R.PrimaryCoverage, R.CoverageSubType, R.LossParty,
+    0,
+    (SELECT CONVERT(DATETIME2(7), CONCAT(VC.CREATE_DATE, ' ', VC.CREATE_TIME))
+     FROM SourceStaging.VECCASRN.VEC_CASE VC WHERE VC.ID = TE.TP_ID),
+    TE.CLAIM_REF,
+    ISNULL(LK.CC_ClaimantType_Code, 'other')
+FROM TP_ELEMENTS TE
+INNER JOIN dbo.LKP_EXPOSURE_MOTOR_RULES R ON R.RuleKey = TE.RuleKey
+LEFT JOIN dbo.LKP_TP_CLAIMANT_TYPE LK ON LK.VectusDisplayString = TE.ClaimantRoleDesc;
+
+
+/* --------------------------------------------------------------
+   BLOCK C: 3rd Party Hire & Mobility
+   PAYMENT CODE LIST CONFLICT - see chat message.
+   -------------------------------------------------------------- */
+;WITH TP_HIRE_CANDIDATES AS (
+    SELECT CLM.CLAIM_REF, CLM.PUBLICID AS ClaimPublicID, CLM.GW_HDR_CASEID, TP.ID AS TP_ID
+    FROM IntermediateStaging_DEV.dbo.IS_CLAIM_MASTER CLM
+    INNER JOIN SourceStaging.VECCASRN.VEC_GW_MOTOR_TP TP ON TP.GW_HDR_CASEID = CLM.GW_HDR_CASEID
+    LEFT JOIN SourceStaging.VECCASRN.VEC_GW_TP_SUMMARY TPS ON TPS.CASEID = TP.ID
+    WHERE UPPER(LTRIM(RTRIM(CLM.PRODUCT))) = 'MOTOR'
+      AND (
+            EXISTS (
+                SELECT 1 FROM SourceStaging.VECCASRN.VEC_GW_PAY_TRANS PT
+                INNER JOIN SourceStaging.VECCASRN.VEC_GW_PAY_DISS PD ON PD.GW_PAY_TRAN_ID = PT.ID
+                WHERE PT.GW_HDR_CASEID = TP.GW_HDR_CASEID
+                  AND PD.CODE IN ('ABH','COW','OUH','PLH','PLP','RVM','SUB','TEM','TPH','FSC','ABA','ABP')
+            )
+            OR (TPS.VEHICLE = 'X' AND EXISTS (SELECT 1 FROM SourceStaging.VECCASRN.VEC_GW_HIREREC HR WHERE HR.CASEID = TP.ID))
+      )
+)
+INSERT INTO IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR
+(PublicID, ClaimID, VectusCaseID_Adm, GW_HDR_CASEID, SourceOrigin_Adm, ExposureType, PrimaryCoverage,
+ CoverageSubType, LossParty, ClaimOrder, CreateTime, CLAIM_REF, ClaimantType)
+SELECT
+    'mig:exp:tphire:' + H.ClaimPublicID + '_' + CONVERT(VARCHAR(64), H.TP_ID),
+    H.ClaimPublicID, CONVERT(VARCHAR(64), H.TP_ID), H.GW_HDR_CASEID, 'TP_HIRE',
+    R.ExposureType, R.PrimaryCoverage, R.CoverageSubType, R.LossParty,
+    0,
+    (SELECT CONVERT(DATETIME2(7), CONCAT(VC.CREATE_DATE, ' ', VC.CREATE_TIME))
+     FROM SourceStaging.VECCASRN.VEC_CASE VC WHERE VC.ID = H.TP_ID),
+    H.CLAIM_REF,
+    'other'
+FROM TP_HIRE_CANDIDATES H
+INNER JOIN dbo.LKP_EXPOSURE_MOTOR_RULES R ON R.RuleKey = 'TP_HIRE';
+
+
+/* --------------------------------------------------------------
+   BLOCK D: 1st Party PA Ancillary
+   -------------------------------------------------------------- */
+;WITH PA_COV_CHECK AS (
+    SELECT
+        CLM.CLAIM_REF, CLM.PUBLICID AS ClaimPublicID, CLM.GW_HDR_CASEID, PA.ID AS PA_ID,
+        MAX(CASE WHEN COV.PATTERN_CODE = 'PMPersonalInjuryPlusAncCov' THEN 1 ELSE 0 END) AS HasPlusCov
+    FROM IntermediateStaging_DEV.dbo.IS_CLAIM_MASTER CLM
+    INNER JOIN SourceStaging.VECCASRN.VEC_PA_ANCILLARY PA ON PA.GW_HDR_CASEID = CLM.GW_HDR_CASEID
+    INNER JOIN SourceStaging.VECCASRN.VEC_GWP_SLCTD_RISK SR ON SR.GW_HDR_CASEID = CLM.GW_HDR_CASEID
+    INNER JOIN SourceStaging.VECCASRN.VEC_GWP_RISKUNIT RSK ON RSK.GWP_POLICYID = SR.GWP_POLICYID AND RSK.PUBLICID = SR.PUBLICID
+    LEFT JOIN SourceStaging.VECCASRN.VEC_GWP_COVERAGE COV
+        ON COV.GWP_RISKUNITID = RSK.ID AND COV.PATTERN_CODE IN ('PMPersonalInjuryAncCov','PMPersonalInjuryPlusAncCov')
+    WHERE UPPER(LTRIM(RTRIM(CLM.PRODUCT))) = 'MOTOR'
+    GROUP BY CLM.CLAIM_REF, CLM.PUBLICID, CLM.GW_HDR_CASEID, PA.ID
+)
+INSERT INTO IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR
+(PublicID, ClaimID, VectusCaseID_Adm, GW_HDR_CASEID, SourceOrigin_Adm, ExposureType, PrimaryCoverage,
+ CoverageSubType, LossParty, ClaimOrder, CreateTime, CLAIM_REF, ClaimantType)
+SELECT
+    'mig:exp:pa:' + PC.ClaimPublicID + '_' + CONVERT(VARCHAR(64), PC.PA_ID),
+    PC.ClaimPublicID, CONVERT(VARCHAR(64), PC.PA_ID), PC.GW_HDR_CASEID, 'PA',
+    R.ExposureType, R.PrimaryCoverage, R.CoverageSubType, R.LossParty,
+    0,
+    (SELECT CONVERT(DATETIME2(7), CONCAT(VC.CREATE_DATE, ' ', VC.CREATE_TIME))
+     FROM SourceStaging.VECCASRN.VEC_CASE VC WHERE VC.ID = PC.PA_ID),
+    PC.CLAIM_REF, 'insured'
+FROM PA_COV_CHECK PC
+INNER JOIN dbo.LKP_EXPOSURE_MOTOR_RULES R ON R.RuleKey = CASE WHEN PC.HasPlusCov = 1 THEN 'PA_PLUS' ELSE 'PA_STD' END;
+
+
+/* --------------------------------------------------------------
+   BLOCK E: mandatory defaults
+   -------------------------------------------------------------- */
+UPDATE IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR
+SET RIGroupSetExternally = 0, SupplementalWorkloadWeight = 0, WorkloadWeight = 0;
+
+UPDATE IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR SET AssignmentStatus = 'assigned';
+
+
+/* --------------------------------------------------------------
+   BLOCK F: CoverageID
+   FIXED (real fix this time, not just a tiebreak): only match against
+   coverage-origin rows (VEC_GMP_COVERAGEID IS NOT NULL), never
+   inclusion-origin rows (INC_ID IS NOT NULL). An inclusion is a
+   sub-term within a coverage, not a standalone insurable category - it
+   should never be picked as an exposure's PrimaryCoverage. CONFIRM this
+   assumption with BA/senior (see chat) - the dedup below is now a
+   backup safeguard only, for the less likely case of two genuine
+   coverage rows sharing a Type.
+   -------------------------------------------------------------- */
+;WITH COVERAGE_DEDUP AS (
+    SELECT ClaimPublicID, Type, PublicID,
+        ROW_NUMBER() OVER (PARTITION BY ClaimPublicID, Type ORDER BY PublicID ASC) AS RN
+    FROM IntermediateStaging_DEV.dbo.IS_COVERAGE
+    WHERE Subtype = 'VehicleCoverage'
+      AND VEC_GMP_COVERAGEID IS NOT NULL   -- NEW: exclude inclusion-origin rows
+)
+UPDATE E
+SET E.CoverageID = CD.PublicID
+FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR E
+INNER JOIN COVERAGE_DEDUP CD ON CD.ClaimPublicID = E.ClaimID AND CD.Type = E.PrimaryCoverage AND CD.RN = 1;
+
+
+/* --------------------------------------------------------------
+   BLOCK G: IncidentID (provisional, unchanged)
+   -------------------------------------------------------------- */
+UPDATE E
+SET E.IncidentID = 'mig:motor:veh:fp' + E.VectusCaseID_Adm
+FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR E
+WHERE E.SourceOrigin_Adm = 'AD';
+
+UPDATE E
+SET E.IncidentID = 'mig:motor:veh:tp' + E.VectusCaseID_Adm
+FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR E
+WHERE E.SourceOrigin_Adm = 'TP_VEH';
+
+
+/* --------------------------------------------------------------
+   BLOCK H: ClaimantDenormID / ClaimantType
+   FIXED: 3rd party join now uses CM.HDR_TYPE_ID (was CM.GWCFHDR_TYPEID)
+   -------------------------------------------------------------- */
+UPDATE E
+SET E.ClaimantDenormID = CC.ContactID
+FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR E
+INNER JOIN IntermediateStaging_DEV.dbo.IS_CLAIMCONTACTROLE CCR ON CCR.Role = 'insured'
+INNER JOIN IntermediateStaging_DEV.dbo.IS_CLAIMCONTACT CC ON CC.PublicID = CCR.ClaimContactID AND CC.ClaimID = E.ClaimID
+WHERE E.SourceOrigin_Adm IN ('AD','PA');
+
+UPDATE E
+SET E.ClaimantDenormID = CM.PublicID
+FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR E
+INNER JOIN IntermediateStaging_DEV.dbo.CONTACT_MASTER_MOTOR CM ON CM.GW_HDR_CASEID = E.GW_HDR_CASEID AND CM.HDR_TYPE_ID = 55
+INNER JOIN SourceStaging.VECCASRN.VEC_GW_CF_HDR_TYPE HT ON HT.ID = CM.HDR_TYPE_ID AND HT.PRIMCONT_TYPE = 'Y'
+WHERE E.SourceOrigin_Adm IN ('TP_VEH','TP_INJ','TP_PRO','TP_HIRE');
+
+
+/* --------------------------------------------------------------
+   BLOCK I: BI/Liability fields
+   -------------------------------------------------------------- */
+UPDATE E
+SET E.LiabilityPosition_Adm = TL.GW_TypeCode
+FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR E
+INNER JOIN SourceStaging.VECCASRN.VEC_GW_LIABILITY LIAB
+    ON LIAB.CASEID = CONVERT(BIGINT, E.VectusCaseID_Adm) AND LIAB.CURRENT_REC = 'X'
+LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL ON TL.Vectus_TypeCode = LIAB.LIAB_STATUS AND TL.TypeList_Name = 'LiabilityPosition_Adm'
+WHERE E.SourceOrigin_Adm IN ('TP_VEH','TP_INJ','TP_PRO','TP_HIRE');
+
+;WITH LATEST_RES_TRANS AS (
+    SELECT RT.ID, RT.CASEID,
+        ROW_NUMBER() OVER (PARTITION BY RT.CASEID ORDER BY RT.GORDER DESC) AS RN
+    FROM SourceStaging.VECCASRN.VEC_GW_RES_TRANS RT
+    WHERE RT.ACCEPTED = 'Y'
+),
+BI_RESERVE AS (
+    SELECT E.PublicID, RA.CLAIM_LIFE, RA.LIABILITY, RA.YRS_TO_ISSUE
+    FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR E
+    INNER JOIN LATEST_RES_TRANS LRT ON LRT.CASEID = CONVERT(BIGINT, E.VectusCaseID_Adm) AND LRT.RN = 1
+    INNER JOIN SourceStaging.VECCASRN.VEC_GW_RES_ADJUST RA ON RA.GW_RES_TRANSID = LRT.ID
+    WHERE E.SourceOrigin_Adm = 'TP_INJ'
+)
+UPDATE E
+SET E.BIClaimLife_Adm = BR.CLAIM_LIFE,
+    E.BIReservePercentage_Adm = BR.LIABILITY,
+    E.BIYearsToIssue_Adm = BR.YRS_TO_ISSUE
+FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR E
+INNER JOIN BI_RESERVE BR ON BR.PublicID = E.PublicID;
+
+
+/* --------------------------------------------------------------
+   BLOCK J: CILFigure_Adm / CILNotes_Adm
+   -------------------------------------------------------------- */
+;WITH CIL_TOTALS AS (
+    SELECT PT.GW_HDR_CASEID, SUM(PD.AMOUNT) AS TotalCIL
+    FROM SourceStaging.VECCASRN.VEC_GW_PAY_TRANS PT
+    INNER JOIN SourceStaging.VECCASRN.VEC_GW_PAY_DISS PD ON PD.GW_PAY_TRAN_ID = PT.ID
+    WHERE PD.CODE IN ('CIL','CIP')
+    GROUP BY PT.GW_HDR_CASEID
+)
+UPDATE E
+SET E.CILFigure_Adm = CT.TotalCIL, E.CILNotes_Adm = 'CIL'
+FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR E
+INNER JOIN CIL_TOTALS CT ON CT.GW_HDR_CASEID = E.GW_HDR_CASEID;
+
+
+/* --------------------------------------------------------------
+   BLOCK K: State / CloseDate
+   -------------------------------------------------------------- */
+UPDATE E
+SET E.State = TL.GW_TypeCode
+FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR E
+INNER JOIN SourceStaging.VECCASRN.VEC_GW_CASE_STATUS CS
+    ON CS.CASEID = CONVERT(BIGINT, E.VectusCaseID_Adm) AND CS.GCURRENT = 'X'
+LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL ON TL.Vectus_TypeCode = CS.STATUS AND TL.TypeList_Name = 'ExposureState'
+WHERE E.SourceOrigin_Adm <> 'TP_HIRE' AND TL.GW_TypeCode IS NOT NULL;
+
+;WITH HIRE_SETTLED AS (
+    SELECT CASEID, MAX(ORDERING) AS MaxOrdering
+    FROM SourceStaging.VECCASRN.VEC_HISTORY
+    WHERE HISTORYTEXT = 'Hire claim settled'
+    GROUP BY CASEID
+),
+HIRE_SETTLED_DETAIL AS (
+    SELECT H.CASEID, H.CREATEDATE, H.CREATETIME
+    FROM SourceStaging.VECCASRN.VEC_HISTORY H
+    INNER JOIN HIRE_SETTLED HS ON HS.CASEID = H.CASEID AND HS.MaxOrdering = H.ORDERING
+),
+HIRE_CASE_STATUS AS (
+    SELECT CS.CASEID, CS.STATUS
+    FROM SourceStaging.VECCASRN.VEC_GW_CASE_STATUS CS
+    WHERE CS.GCURRENT = 'X'
+)
+UPDATE E
+SET E.State = CASE
+        WHEN HCS.STATUS = 'Finalised' THEN 'closed'
+        WHEN HSD.CASEID IS NOT NULL THEN 'closed'
+        ELSE 'open'
+     END,
+    E.CloseDate = CASE
+        WHEN HSD.CASEID IS NOT NULL THEN CONVERT(DATETIME2(7), CONCAT(HSD.CREATEDATE, ' ', HSD.CREATETIME))
+        ELSE NULL
+     END
+FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR E
+LEFT JOIN HIRE_CASE_STATUS HCS ON HCS.CASEID = CONVERT(BIGINT, E.VectusCaseID_Adm)
+LEFT JOIN HIRE_SETTLED_DETAIL HSD ON HSD.CASEID = CONVERT(BIGINT, E.VectusCaseID_Adm)
+WHERE E.SourceOrigin_Adm = 'TP_HIRE';
+
+UPDATE E
+SET E.CloseDate = CS.RECORD_DATE
+FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR E
+INNER JOIN SourceStaging.VECCASRN.VEC_GW_CASE_STATUS CS
+    ON CS.CASEID = CONVERT(BIGINT, E.VectusCaseID_Adm) AND CS.GCURRENT = 'X' AND CS.STATUS = 'Finalised'
+WHERE E.SourceOrigin_Adm <> 'TP_HIRE' AND E.State = 'closed';
+
 END
 GO
 
 
 /* =====================================================================
-   PROC 2: usp_Load_IS_VEHICLE_RISKUNIT_MOTOR
-   Fixes vs your senior's version:
-     - VehicleID now populated ('mig:advehicle'+V.ID) - was hard-coded
-       NULL, this is what caused your recon NULLs
-     - PolicyID now = CLM.PUBLICID instead of the raw source Policy_ID
-       (the "-- LATER THIS will change" TODO)
-     - RUNumber now a real sequential int (was RU.PUBLICID, a string)
-     - RiskUnitPublicID: deterministic composite ID, not ROW_NUMBER()
-   ===================================================================== */
-USE [IntermediateStaging_DEV]
-GO
-CREATE OR ALTER PROCEDURE [dbo].[usp_Load_IS_VEHICLE_RISKUNIT_MOTOR]
-AS
-BEGIN
-TRUNCATE TABLE IntermediateStaging_DEV.dbo.IS_VEHICLE_RISKUNIT_MOTOR;
-
-INSERT INTO IntermediateStaging_DEV.dbo.IS_VEHICLE_RISKUNIT_MOTOR
-(
-    CLAIM_REF, RiskUnitPublicID, RUNumber, PolicyID, VehicleLocationID,
-    SubPolicyID_Adm, ClaimsRiskType_Adm, CourtesyCar_Adm, CoverableType_Adm, CoverType_Adm,
-    CriminalConvictions_Adm, CubicCapacity_Adm, EffectiveDate_Adm, ExpirationDate_Adm,
-    NotOnCover_Adm, RegisteredOwnerName_Adm, SecurityFeatures_Adm, SignWriting_Adm,
-    TempAddedExpDate_Adm, TempAdded_Adm, TempAddedReason_Adm, TelematicsStdDis_Adm,
-    TelematicsFlag_Adm, TelematicsInstallationDate_Adm, TelematicsProduct_Adm,
-    TelematicsStatus_Adm, Transmission_Adm, TierType_Adm, VehicleID, VehicleOwner_Adm,
-    VehicleOwnerName_Adm
-)
-SELECT
-    CLM.CLAIM_REF,
-    /* deterministic PublicID, not ROW_NUMBER() */
-    'mig:motorriskunit' + CONVERT(VARCHAR(64), CLM.ID) + '_' + CONVERT(VARCHAR(64), SR.ID),
-    /* RUNumber: real sequential int, RU.PUBLICID is a string - never put that here */
-    ROW_NUMBER() OVER (PARTITION BY SR.GWP_POLICYID ORDER BY RU.ID),
-    /* PolicyID: FIX - must equal IS_POLICY.PublicID, not raw source Policy_ID */
-    CLM.PUBLICID,
-    NULL,   -- VehicleLocationID: still needs IS_POLICYLOCATION's public-id formula
-    SR.SUB_POLICYID,
-    TRT.GW_TypeCode,
-    CASE WHEN LM.LEND_METHOD='Courtesy Car' THEN 1 ELSE NULL END,
-    CVBT.GW_TypeCode,
-    CVT.GW_TypeCode,
-    CASE WHEN RU.CONVICTIONS='Y' THEN 1 ELSE NULL END,
-    V.CUBIC_CAPACITY,
-    P.EffectiveDate,
-    P.ExpirationDate,
-    CASE WHEN DOC.CVRD_ON_VEH='Y' THEN 1 ELSE NULL END,
-    V.REGOWNER_NAME,
-    SEC.GW_TypeCode,
-    V.SIGNWRITING,
-    CONVERT(varchar(19), V.TAV_DATE, 120),
-    CASE WHEN V.TAV_FLAG='Y' THEN 1 ELSE NULL END,
-    TAVRSN.GW_TypeCode,
-    TSTD.GW_TypeCode,
-    CASE WHEN V.TELEM_FLAG='Y' THEN 1 ELSE NULL END,
-    CONVERT(varchar(19), V.TELEM_INSTALL, 120),
-    TPROD.GW_TypeCode,
-    TSTAT.GW_TypeCode,
-    V.TRANSMISSION,
-    TIER.GW_TypeCode,
-    /* VehicleID: FIX - was hard-coded NULL, this broke your recon.
-       Matches the PublicID formula usp_Load_SS_to_IS_VEHICLE uses for
-       the AD/1st-party vehicle off the same VEC_GWP_VEHICLE row. */
-    'mig:advehicle' + CONVERT(VARCHAR(64), V.ID),
-    CASE WHEN V.VEH_OWNER='Y' THEN 1 ELSE NULL END,
-    V.VEH_OWNER_NAME
-FROM IntermediateStaging_DEV.dbo.IS_CLAIM_MASTER CLM
-INNER JOIN IntermediateStaging_DEV.dbo.IS_POLICY P ON P.PublicID = CLM.PUBLICID
-INNER JOIN [SourceStaging].[VECCASRN].VEC_GWP_SLCTD_RISK SR ON CLM.GW_HDR_CASEID = SR.GW_HDR_CASEID
-INNER JOIN [SourceStaging].[VECCASRN].VEC_GWP_RISKUNIT RU ON RU.GWP_POLICYID = SR.GWP_POLICYID AND RU.PUBLICID = SR.PUBLICID
-LEFT JOIN [SourceStaging].[VECCASRN].VEC_GWP_VEHICLE V ON V.GWP_RISKUNITID = RU.ID
-LEFT JOIN [SourceStaging].[VECCASRN].VEC_GW_RSKNOTONPOL RNP ON RNP.GW_VEHICLEID = V.ID
-LEFT JOIN [SourceStaging].[VECCASRN].VEC_GW_DOC_INSDCVD DOC ON DOC.ID = RNP.DOC_INSDCVDID
-LEFT JOIN [SourceStaging].[VECCASRN].VEC_GW_LEND_METH LM ON LM.ID = RNP.GW_LEND_METHID
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TRT ON TRT.Vectus_TypeCode=RU.RISK_TYPE AND TRT.TypeList_Name='ClaimsRiskType_Adm'
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING CVBT ON CVBT.Vectus_TypeCode=RU.COVERABLE_TYPE AND CVBT.TypeList_Name='CoverableType_Adm'
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING CVT ON CVT.Vectus_TypeCode=RU.COVER_TYPE AND CVT.TypeList_Name='CoverType_Adm'
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING SEC ON SEC.Vectus_TypeCode=V.SECURITY_DESC AND SEC.TypeList_Name='PMSecurityFeatures_Adm'
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TAVRSN ON TAVRSN.Vectus_TypeCode=V.TAV_REASON AND TAVRSN.TypeList_Name='TempVehicleReason_Adm'
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TSTD ON TSTD.Vectus_TypeCode=V.TELEM_DISCOUNT AND TSTD.TypeList_Name='PMTelematicsStdDisc_Adm'
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TPROD ON TPROD.Vectus_TypeCode=V.TELEM_PRODUCT AND TPROD.TypeList_Name='TelematicsProduct_Adm'
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TSTAT ON TSTAT.Vectus_TypeCode=V.TELEM_STATUS AND TSTAT.TypeList_Name='TelematicsStatus_Adm'
-LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TIER ON TIER.Vectus_TypeCode=RU.TIER AND TIER.TypeList_Name='TierType_Adm'
-WHERE UPPER(LTRIM(RTRIM(CLM.PRODUCT))) = 'MOTOR';
-END
-GO
-
-
-/* =====================================================================
-   PROC 3: usp_Load_SS_to_IS_RISKUNIT (consolidation)
-   Same structure as your senior's version (this part was fine) - just
-   confirm CLAIM_MASTER vs IS_CLAIM_MASTER is the correct table name in
-   your environment (your pasted version used the unqualified
-   CLAIM_MASTER, everywhere else in the codebase it's IS_CLAIM_MASTER).
-   ===================================================================== */
-USE [IntermediateStaging_DEV]
-GO
-CREATE OR ALTER PROCEDURE [dbo].[usp_Load_SS_to_IS_RISKUNIT]
-AS
-BEGIN
-TRUNCATE TABLE [IntermediateStaging_DEV].[dbo].[IS_RISKUNIT];
-
-INSERT INTO [IntermediateStaging_DEV].[dbo].[IS_RISKUNIT]
-(
-    PublicID, RUNumber, PolicyID, PolicyLocationID, CoverableType_Adm, CoverType_Adm,
-    ClaimsRiskType_Adm, CriminalConvictions_Adm, TierType_Adm, SubPolicyID_Adm, Subtype,
-    AlarmType_Adm,AnySmokers_Adm,Bankruptcy_Adm,Bedsit_Adm,BuildingWorkInProgress_Adm,
-    CentralHeating_Adm,CurrentlyOccProperty_Adm,DaysUnoccupied_Adm,Description,
-    FlatRoofPercentage_Adm,FloodHistoryValues_Adm,FloodReID_Adm,GarageOrOutBldng_Adm,
-    GoodStateOfRepair_Adm,HowYouPay_Adm,ListedBuilding_Adm,MonthlyRentalAmount_Adm,
-    NoOfAdults_Adm,NoOfBathrooms_Adm,NoOfBedrooms_Adm,NoOfBedsits_Adm,NoOfChildren_Adm,
-    NoOfLodgers_Adm,NoOfStaff_Adm,NoOfTenants_Adm,PermanentResidence_Adm,PropertyManaged_Adm,
-    PropertyOccByTen_Adm,PropertyOwnedDate_Adm,PropertyStyle_Adm,PropertyType_Adm,PropertyUse_Adm,
-    PropOccupiedbyTenants_Adm,PropUsedFor_Adm,PropUsedForCommIns_Adm,PropUsedForType_Adm,
-    RenovationCost_Adm,RenovationEndDate_Adm,RenovationStartDate_Adm,RenovationType_Adm,
-    RoofType_Adm,SolarPanels_Adm,SpecialTerms_Adm,StartDateBuildings_Adm,StartDateContents_Adm,
-    Sublet_Adm,TenancyAgreeInPlc_Adm,TenancyAgreement_Adm,TenantReferenceChecked_Adm,
-    TenantTheft_Adm,ThatchCondition_Adm,Trees_Adm,Underpined_Adm,UnoccupiedReason_Adm,
-    ValueOfStock_Adm,WallType_Adm,WatercourseProxy_Adm,WhoIsCovered_Adm,YearBuilt_Adm
-)
-SELECT
-    PROPRISK.RiskUnitPublicID, PROPRISK.RUNumber, PROPRISK.PolicyID, PROPRISK.PolicyLocationID,
-    PROPRISK.CoverableType_Adm, PROPRISK.CoverType_Adm, PROPRISK.ClaimsRiskType_Adm,
-    PROPRISK.CriminalConvictions_Adm, PROPRISK.TierType_Adm, PROPRISK.SubPolicyID_Adm, 'PropertyRU',
-    PROPRISK.AlarmType_Adm,PROPRISK.AnySmokers_Adm,PROPRISK.Bankruptcy_Adm,PROPRISK.Bedsit_Adm,
-    PROPRISK.BuildingWorkInProgress_Adm,PROPRISK.CentralHeating_Adm,PROPRISK.CurrentlyOccProperty_Adm,
-    PROPRISK.DaysUnoccupied_Adm,PROPRISK.Description,PROPRISK.FlatRoofPercentage_Adm,
-    PROPRISK.FloodHistoryValues_Adm,PROPRISK.FloodReID_Adm,PROPRISK.GarageOrOutBldng_Adm,
-    PROPRISK.GoodStateOfRepair_Adm,PROPRISK.HowYouPay_Adm,PROPRISK.ListedBuilding_Adm,
-    PROPRISK.MonthlyRentalAmount_Adm,PROPRISK.NoOfAdults_Adm,PROPRISK.NoOfBathrooms_Adm,
-    PROPRISK.NoOfBedrooms_Adm,PROPRISK.NoOfBedsits_Adm,PROPRISK.NoOfChildren_Adm,
-    PROPRISK.NoOfLodgers_Adm,PROPRISK.NoOfStaff_Adm,PROPRISK.NoOfTenants_Adm,
-    PROPRISK.PermanentResidence_Adm,PROPRISK.PropertyManaged_Adm,PROPRISK.PropertyOccByTen_Adm,
-    PROPRISK.PropertyOwnedDate_Adm,PROPRISK.PropertyStyle_Adm,PROPRISK.PropertyType_Adm,
-    PROPRISK.PropertyUse_Adm,PROPRISK.PropOccupiedbyTenants_Adm,PROPRISK.PropUsedFor_Adm,
-    PROPRISK.PropUsedForCommIns_Adm,PROPRISK.PropUsedForType_Adm,PROPRISK.RenovationCost_Adm,
-    PROPRISK.RenovationEndDate_Adm,PROPRISK.RenovationStartDate_Adm,PROPRISK.RenovationType_Adm,
-    PROPRISK.RoofType_Adm,PROPRISK.SolarPanels_Adm,PROPRISK.SpecialTerms_Adm,
-    PROPRISK.StartDateBuildings_Adm,PROPRISK.StartDateContents_Adm,PROPRISK.Sublet_Adm,
-    PROPRISK.TenancyAgreeInPlc_Adm,PROPRISK.TenancyAgreement_Adm,PROPRISK.TenantReferenceChecked_Adm,
-    PROPRISK.TenantTheft_Adm,PROPRISK.ThatchCondition_Adm,PROPRISK.Trees_Adm,PROPRISK.Underpined_Adm,
-    PROPRISK.UnoccupiedReason_Adm,PROPRISK.ValueOfStock_Adm,PROPRISK.WallType_Adm,
-    PROPRISK.WatercourseProxy_Adm,PROPRISK.WhoIsCovered_Adm,PROPRISK.YearBuilt_Adm
-FROM [IntermediateStaging_DEV].[dbo].[IS_PROPERTY_RISKUNIT_HOUSEHOLD] PROPRISK
-INNER JOIN [IntermediateStaging_DEV].[dbo].[IS_CLAIM_MASTER] CM ON PROPRISK.CLAIM_REF = CM.CLAIM_REF
-WHERE UPPER(LTRIM(RTRIM(CM.PRODUCT))) = 'HOUSEHOLD';
-
-INSERT INTO [IntermediateStaging_DEV].[dbo].[IS_RISKUNIT]
-(
-    PublicID, RUNumber, PolicyID, VehicleLocationID, SubPolicyID_Adm, ClaimsRiskType_Adm,
-    CourtesyCar_Adm, CoverableType_Adm, CoverType_Adm, CriminalConvictions_Adm, CubicCapacity_Adm,
-    EffectiveDate_Adm, ExpirationDate_Adm, NotOnCover_Adm, RegisteredOwnerName_Adm,
-    SecurityFeatures_Adm, SignWriting_Adm, Subtype, TempAddedExpDate_Adm, TempAdded_Adm,
-    TempAddedReason_Adm, TelematicsStdDis_Adm, TelematicsFlag_Adm, TelematicsInstallationDate_Adm,
-    TelematicsProduct_Adm, TelematicsStatus_Adm, Transmission_Adm, TierType_Adm, VehicleID,
-    VehicleOwner_Adm, VehicleOwnerName_Adm
-)
-SELECT
-    VEHRISK.RiskUnitPublicID, VEHRISK.RUNumber, VEHRISK.PolicyID, VEHRISK.VehicleLocationID,
-    VEHRISK.SubPolicyID_Adm, VEHRISK.ClaimsRiskType_Adm, VEHRISK.CourtesyCar_Adm,
-    VEHRISK.CoverableType_Adm, VEHRISK.CoverType_Adm, VEHRISK.CriminalConvictions_Adm,
-    VEHRISK.CubicCapacity_Adm, VEHRISK.EffectiveDate_Adm, VEHRISK.ExpirationDate_Adm,
-    VEHRISK.NotOnCover_Adm, VEHRISK.RegisteredOwnerName_Adm, VEHRISK.SecurityFeatures_Adm,
-    VEHRISK.SignWriting_Adm, 'VehicleRU', VEHRISK.TempAddedExpDate_Adm, VEHRISK.TempAdded_Adm,
-    VEHRISK.TempAddedReason_Adm, VEHRISK.TelematicsStdDis_Adm, VEHRISK.TelematicsFlag_Adm,
-    VEHRISK.TelematicsInstallationDate_Adm, VEHRISK.TelematicsProduct_Adm,
-    VEHRISK.TelematicsStatus_Adm, VEHRISK.Transmission_Adm, VEHRISK.TierType_Adm, VEHRISK.VehicleID,
-    VEHRISK.VehicleOwner_Adm, VEHRISK.VehicleOwnerName_Adm
-FROM [IntermediateStaging_DEV].[dbo].[IS_VEHICLE_RISKUNIT_MOTOR] VEHRISK
-INNER JOIN [IntermediateStaging_DEV].[dbo].[IS_CLAIM_MASTER] CM ON VEHRISK.CLAIM_REF = CM.CLAIM_REF
-WHERE UPPER(LTRIM(RTRIM(CM.PRODUCT))) = 'MOTOR';
-END
-GO
-
-
-/* =====================================================================
-   VALIDATION QUERIES — run after all three procs, before CCST copy
+   3. VALIDATION / FAN-OUT QUERIES
    ===================================================================== */
 
--- 1) Any NOT NULL business column actually NULL (mirrors GW's own check,
---    catch it here instead of at integrity-check time)
-SELECT PublicID
-FROM IntermediateStaging_DEV.dbo.IS_RISKUNIT
-WHERE PublicID IS NULL OR RUNumber IS NULL OR PolicyID IS NULL
-   OR CoverableType_Adm IS NULL OR Subtype IS NULL;
-
--- 2) PublicID uniqueness
-SELECT PublicID, COUNT(*) FROM IntermediateStaging_DEV.dbo.IS_RISKUNIT
+SELECT PublicID, COUNT(*) FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR
 GROUP BY PublicID HAVING COUNT(*) > 1;
 
--- 3) PolicyID must resolve to a real IS_POLICY row (this is the FK fix -
---    confirm zero rows after applying it)
-SELECT RU.PublicID, RU.PolicyID
-FROM IntermediateStaging_DEV.dbo.IS_RISKUNIT RU
-LEFT JOIN IntermediateStaging_DEV.dbo.IS_POLICY POL ON POL.PublicID = RU.PolicyID
-WHERE POL.PublicID IS NULL;
+SELECT PublicID FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR
+WHERE ClaimID IS NULL OR ExposureType IS NULL OR PrimaryCoverage IS NULL
+   OR ClaimOrder IS NULL OR AssignmentStatus IS NULL OR BIReservePercentage_Adm IS NULL
+   OR RIGroupSetExternally IS NULL OR State IS NULL OR SupplementalWorkloadWeight IS NULL
+   OR WorkloadWeight IS NULL OR CreateTime IS NULL;
 
--- 4) Motor: VehicleID must resolve to a real IS_VEHICLE row
-SELECT RU.PublicID, RU.VehicleID
-FROM IntermediateStaging_DEV.dbo.IS_RISKUNIT RU
-LEFT JOIN IntermediateStaging_DEV.dbo.IS_VEHICLE VEHI ON VEHI.PublicID = RU.VehicleID
-WHERE RU.Subtype = 'VehicleRU' AND (RU.VehicleID IS NULL OR VEHI.PublicID IS NULL);
+SELECT * FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR WHERE CoverageID IS NULL;
 
--- 5) Unmapped CoverableType_Adm codes on the source side (would surface
---    as NULL -> NOT NULL violation) - check both subtypes
-SELECT DISTINCT RSK.COVERABLE_TYPE AS unmapped_household_coverabletype
-FROM SourceStaging.VECCASRN.VEC_GWP_RISKUNIT RSK
-WHERE RSK.COVERABLE_TYPE IS NOT NULL
-  AND NOT EXISTS (
-      SELECT 1 FROM SourceStaging.dbo.TYPELIST_TABLE_MAPPING TM
-      WHERE TM.Vectus_TypeCode = RSK.COVERABLE_TYPE AND TM.TypeList_Name = 'CoverableType_Adm'
-  );
+SELECT GW_HDR_CASEID, COUNT(DISTINCT ID) AS ad_case_count
+FROM SourceStaging.VECCASRN.VEC_GW_MOTOR_AD
+GROUP BY GW_HDR_CASEID
+HAVING COUNT(DISTINCT ID) > 1;
 
--- 6) RUNumber sanity - confirm it's actually numeric-only, no leftover
---    string PublicID slipping through
-SELECT PublicID, RUNumber
-FROM IntermediateStaging_DEV.dbo.IS_RISKUNIT
-WHERE TRY_CONVERT(int, RUNumber) IS NULL;
+SELECT DISTINCT CLAIM_REF FROM SourceStaging.dbo.LKP_Dupe_MotorAD
+WHERE CLAIM_REF IS NOT NULL AND Solution LIKE 'Migrate-group%'
+AND CLAIM_REF NOT IN (SELECT CLAIM_REF FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR WHERE SourceOrigin_Adm = 'AD');
 
--- 7) Row-count parity between the two typed tables and consolidated table
-SELECT
-    (SELECT COUNT(*) FROM IntermediateStaging_DEV.dbo.IS_PROPERTY_RISKUNIT_HOUSEHOLD) AS property_source_cnt,
-    (SELECT COUNT(*) FROM IntermediateStaging_DEV.dbo.IS_VEHICLE_RISKUNIT_MOTOR)       AS motor_source_cnt,
-    (SELECT COUNT(*) FROM IntermediateStaging_DEV.dbo.IS_RISKUNIT WHERE Subtype='PropertyRU') AS property_final_cnt,
-    (SELECT COUNT(*) FROM IntermediateStaging_DEV.dbo.IS_RISKUNIT WHERE Subtype='VehicleRU')  AS motor_final_cnt;
+SELECT SourceOrigin_Adm, COUNT(*) AS total, SUM(CASE WHEN IncidentID IS NULL THEN 1 ELSE 0 END) AS null_incidents
+FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR
+GROUP BY SourceOrigin_Adm;
+
+SELECT CLM.CLAIM_REF, COUNT(*) AS tp_case_count
+FROM IntermediateStaging_DEV.dbo.IS_CLAIM_MASTER CLM
+INNER JOIN SourceStaging.VECCASRN.VEC_GW_MOTOR_TP TP ON TP.GW_HDR_CASEID = CLM.GW_HDR_CASEID
+WHERE UPPER(LTRIM(RTRIM(CLM.PRODUCT))) = 'MOTOR'
+GROUP BY CLM.CLAIM_REF
+HAVING COUNT(*) > 1;
+
+SELECT DISTINCT T.DISPLAY_STRING
+FROM SourceStaging.VECCASRN.VEC_GW_TP_SUMMARY S
+INNER JOIN SourceStaging.VECCASRN.VEC_GW_TPTYPE T ON T.ID = S.GW_TP_TYPEID
+WHERE NOT EXISTS (SELECT 1 FROM dbo.LKP_TP_CLAIMANT_TYPE LK WHERE LK.VectusDisplayString = T.DISPLAY_STRING);
+
+SELECT ClaimID, SourceOrigin_Adm, COUNT(*) AS cnt
+FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR
+GROUP BY ClaimID, SourceOrigin_Adm
+ORDER BY cnt DESC;
+
+-- NEW: HARD CONSTRAINT CHECK per the BA session - "I cannot create two
+-- first-party vehicle exposures" for one claim. This must return ZERO
+-- rows before anything goes to CCST. Any row here means LKP_Dupe_MotorAD
+-- doesn't yet cover a real duplicate-AD pair on that claim - take these
+-- exact claim refs back to BA for a decision-table update, do not guess
+-- which one to keep.
+-- NEW: are there real duplicate coverage-origin (not inclusion) rows
+-- sharing a Type for one claim? This is the case the dedup safety net
+-- actually exists for, now that inclusions are excluded above.
+SELECT ClaimPublicID, Type, COUNT(*) AS dup_count
+FROM IntermediateStaging_DEV.dbo.IS_COVERAGE
+WHERE Subtype = 'VehicleCoverage' AND VEC_GMP_COVERAGEID IS NOT NULL
+GROUP BY ClaimPublicID, Type
+HAVING COUNT(*) > 1;
+
+-- HARD CONSTRAINT CHECK per the BA session - "I cannot create two
+-- first-party vehicle exposures" for one claim. Must return ZERO rows
+-- before anything goes to CCST.
+SELECT ClaimID, CLAIM_REF, COUNT(*) AS ad_exposure_count
+FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR
+WHERE SourceOrigin_Adm = 'AD'
+GROUP BY ClaimID, CLAIM_REF
+HAVING COUNT(*) > 1;
+
+-- NEW: quantify the incident/exposure element mismatch flagged above -
+-- how many TP_VEH exposures come from a TP case with INJURY or PROPERTY
+-- also flagged (meaning the current incident proc's exclusive-only
+-- condition would never have created a matching incident for these)
+SELECT COUNT(*) AS tp_veh_exposures_from_combo_cases
+FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR E
+INNER JOIN SourceStaging.VECCASRN.VEC_GW_TP_SUMMARY TPS ON TPS.CASEID = CONVERT(BIGINT, E.VectusCaseID_Adm)
+WHERE E.SourceOrigin_Adm = 'TP_VEH' AND (TPS.INJURY = 'X' OR TPS.PROPERTY = 'X');
+
+-- NEW: typelist coverage gap check for every CT Code the rules table uses
+SELECT DISTINCT R.PrimaryCoverage
+FROM dbo.LKP_EXPOSURE_MOTOR_RULES R
+WHERE NOT EXISTS (
+    SELECT 1 FROM SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL
+    WHERE TL.GW_TypeCode = R.PrimaryCoverage AND TL.[Household/Motor/Both] IN ('Motor only','Both')
+);
