@@ -600,16 +600,20 @@ WHERE E.SourceOrigin_Adm IN ('TP_VEH','TP_INJ','TP_PRO','TP_HIRE');
    VectusCaseID_Adm, matching the naming convention this proc already
    uses for the same concept on IS_EXPOSURE_MOTOR itself). The moment
    that column exists and is confirmed populated correctly, swap the
-   3rd-party block above for this one - the only change is
-   CM.GW_HDR_CASEID = E.GW_HDR_CASEID becomes CM.VectusCaseID_Adm =
-   E.VectusCaseID_Adm, pinning the match to the exact TP case instead
-   of the whole claim.
+   3rd-party block above for this one. GW_HDR_CASEID is kept alongside
+   VectusCaseID_Adm rather than replaced - redundant in the normal case
+   (a case always belongs to its own claim), but a defensive safeguard
+   if the two ever disagree due to a future data-integrity slip: the
+   row simply fails to match instead of silently trusting a corrupted
+   VectusCaseID_Adm value. Same reasoning as the V2CaseFlow addition
+   in Block A/B/D's rule-table joins.
 
 UPDATE E
 SET E.ClaimantDenormID = CM.PublicID
 FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR E
 INNER JOIN IntermediateStaging_DEV.dbo.CONTACT_MASTER_MOTOR CM
-    ON CM.VectusCaseID_Adm = E.VectusCaseID_Adm
+    ON CM.GW_HDR_CASEID = E.GW_HDR_CASEID
+    AND CM.VectusCaseID_Adm = E.VectusCaseID_Adm
     AND CM.HDR_TYPE_ID = 55
 INNER JOIN SourceStaging.VECCASRN.VEC_GW_CF_HDR_TYPE HT ON HT.ID = CM.HDR_TYPE_ID AND HT.PRIMCONT_TYPE = 'Y'
 WHERE E.SourceOrigin_Adm IN ('TP_VEH','TP_INJ','TP_PRO','TP_HIRE');
