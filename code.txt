@@ -1,4 +1,120 @@
 /* =====================================================================
+   IS_EXPOSURE_MOTOR — v19
+   CORRECTION to my own v18 edit: I'd accidentally deleted the 1st-party
+   ClaimantDenormID UPDATE while adding commentary - caught and restored
+   on full re-verification before shipping this file, per the standing
+   practice, exactly the kind of thing that check is for.
+   Also added the actual "future" 3rd-party ClaimantDenormID query (as
+   an inert comment, not live) showing precisely what changes once
+   CONTACT_MASTER_MOTOR gets its per-TP-case column - previously I only
+   described this in chat without ever writing the real query, which
+   was a fair thing to call out.
+   ===================================================================== */
+/* =====================================================================
+   IS_EXPOSURE_MOTOR — v18
+   REAL BUG FIX in Block G: IncidentID was being set by string
+   concatenation (constructing a PublicID-shaped value) instead of a
+   real join to IS_INCIDENT, breaking the PublicID-as-real-pointer
+   convention that CoverageID and ClaimantDenormID correctly follow.
+   Now joins to IS_INCIDENT.PublicID directly - if no matching row
+   exists, IncidentID correctly stays NULL instead of pointing at a
+   nonexistent incident. This will likely INCREASE the null_incidents
+   count in the validation query below versus before - that's the fix
+   working as intended, surfacing gaps that were previously hidden by
+   the fake string, not a new problem introduced by this change.
+   ===================================================================== */
+/* =====================================================================
+   IS_EXPOSURE_MOTOR — v17
+   No functional/logic changes - ExposureState and LiabilityPosition_Adm
+   already used exact-match joins, which now resolve correctly once
+   TYPELIST_crammed_row_fix.sql is run (confirmed splits: 'Open Re-opened
+   Re-Opened' -> 'Open'+'Re-Opened'; 'Admitted Split Agreed' ->
+   'Admitted'+'Split Agreed', both verified against real source data,
+   not guessed). Comments updated in Blocks I and K to reflect this is
+   now resolved rather than open. ClaimantType's exact-match+fallback
+   design from v16 is unchanged - its own crammed-row fix is deferred
+   per your instruction, not part of this round.
+   ===================================================================== */
+/* =====================================================================
+   IS_EXPOSURE_MOTOR — v16
+   ClaimantType now tries an exact match against TYPELIST_TABLE_MAPPING
+   first (same pattern as every other typelist join in this proc), only
+   falling back to the fuzzy LIKE-based lookup if exact match finds
+   nothing. This is a transition design: once ClaimantType's crammed
+   rows are split at the data layer (see the new TYPELIST_crammed_row_fix.sql
+   file), the exact match starts succeeding and the fallback simply
+   stops being used - no further code change needed at that point.
+   The underlying crammed-row problem is confirmed to affect
+   ExposureState and LiabilityPosition_Adm too (both already use exact-
+   match joins, so they need the DATA fix only, no code change here).
+   ===================================================================== */
+/* =====================================================================
+   IS_EXPOSURE_MOTOR — v15
+   ClaimantType for 3rd-party exposures now sourced from the real
+   TYPELIST_TABLE_MAPPING table (confirmed to exist by you), not the
+   retired LKP_TP_CLAIMANT_TYPE. Uses LIKE matching since the source
+   table's Vectus_TypeCode packs multiple values per row with no
+   delimiter. Surfaced real ambiguities in that table itself - see
+   Block B's comments and the new validation query in section 3. No
+   other blocks touched.
+   ===================================================================== */
+/* =====================================================================
+   IS_EXPOSURE_MOTOR — v14
+   LKP_EXPOSURE_MOTOR_RULES now carries V2CaseFlow (the sheet's own
+   first column - GW MOTOR AD / GW MOTOR TP / GW PI ANCILLARY), which
+   was missing before. Every block's join to this table now also
+   matches on V2CaseFlow, not just RuleKey - a defensive cross-check so
+   any future wiring mistake (a block accidentally matching the wrong
+   rule row) fails as zero exposures rather than silently using a
+   plausible but wrong mapping. No other blocks touched.
+   ===================================================================== */
+/* =====================================================================
+   IS_EXPOSURE_MOTOR — v13
+   Block A rewritten per your latest instruction: switched from negative
+   exclusion (throw out on any bad label) to positive selection (only
+   proceed on a flagged AD ID if a clean Migrate decision exists for
+   it). Correctly handles one real AD ID carrying conflicting labels by
+   mistake - the clean Migrate wins regardless of what else is attached
+   to that same ID. New validation query added to surface any real
+   (non-junk) conflicting-solution AD IDs directly. Also cleaned up two
+   orphaned/misplaced comments in the validation section left over from
+   earlier edits (cosmetic only, no functional impact) - full read-
+   through of the entire file completed before this edit, everything
+   else (Blocks B through K, all lookup tables) confirmed unchanged and
+   consistent.
+   ===================================================================== */
+/* =====================================================================
+   IS_EXPOSURE_MOTOR — v12
+   No functional changes to any INSERT/UPDATE block. Two new validation
+   queries added per the latest data review:
+     - GW_CIRCS_TYPID=5 -> TYPCODE confirmation (closes the loss-cause
+       table question for good)
+     - Descope-only-claims-with-no-Migrate-partner check (a variant of
+       the AD hard-constraint issue, catches the opposite failure mode -
+       zero AD exposures instead of two)
+   MOTOR_CIRC_LOSSCAUSE_MAPPING confirmed via the real IS_CLAIM proc to
+   only feed cc_claim.LossCause/Circumstance_Adm, never referenced for
+   exposure creation - no code change needed, this is now resolved.
+   ===================================================================== */
+/* =====================================================================
+   IS_EXPOSURE_MOTOR — v11
+   Block F's CoverageID now correctly prefers coverage-origin rows over
+   inclusion-origin rows when both exist for the same claim+type, and
+   falls back to inclusion-origin when no coverage row exists at all.
+   Fixes v10's gap: a bare ClaimPublicID+Type match had no way to
+   guarantee this preference. New validation query shows which
+   exposures resolved via which path.
+   ===================================================================== */
+/* =====================================================================
+   IS_EXPOSURE_MOTOR — v10
+   Reverted Block F's CoverageID join per your instruction: no longer
+   distinguishes coverage-origin vs inclusion-origin IS_COVERAGE rows -
+   matches on ClaimPublicID + Type only, whichever PublicID that is.
+   Deterministic dedup (lowest PublicID wins if duplicates exist) kept
+   as a safety net so results stay stable run to run, but it no longer
+   prefers one origin over the other.
+   ===================================================================== */
+/* =====================================================================
    IS_EXPOSURE_MOTOR — v9
    Only change: removed the dead CMP-86 conditional-Property comment
    block from Block B - resolved as "use the sheet's unconditional
@@ -72,6 +188,7 @@ GO
    ===================================================================== */
 IF OBJECT_ID('dbo.LKP_EXPOSURE_MOTOR_RULES', 'U') IS NOT NULL DROP TABLE dbo.LKP_EXPOSURE_MOTOR_RULES;
 CREATE TABLE dbo.LKP_EXPOSURE_MOTOR_RULES (
+    V2CaseFlow          VARCHAR(50)  NOT NULL,   -- NEW: the sheet's own first column, was missing before
     RuleKey             VARCHAR(50)  NOT NULL PRIMARY KEY,
     LossType            VARCHAR(20),
     PolicyType          VARCHAR(50),
@@ -83,16 +200,16 @@ CREATE TABLE dbo.LKP_EXPOSURE_MOTOR_RULES (
     ExposureType        VARCHAR(50)
 );
 INSERT INTO dbo.LKP_EXPOSURE_MOTOR_RULES VALUES
-('AD_STD',   'Motor','Personal Motor','PMAccidentalDamage_Inc','PMAccidentalDamage_VehicleDamageInc','VehicleIncident','VehicleDamage','insured','VehicleDamage'),
-('AD_VAN',   'Motor','Personal Motor','PMAccidentalDamage_Inc','PMAccidentalDamage_VehicleDamageInc','VehicleIncident','VehicleDamage','insured','VehicleDamage'),
-('AD_THEFT', 'Motor','Personal Motor','PMFireAndTheft_Inc','PMFireAndTheft_VehicleDamageInc','VehicleIncident','VehicleDamage','insured','VehicleDamage'),
-('AD_VAN_THEFT','Motor','Personal Motor','PMFireAndTheft_Inc','PMFireAndTheft_VehicleDamageInc','VehicleIncident','VehicleDamage','insured','VehicleDamage'),
-('TP_VEH',   'Motor','Personal Motor','PMLiability_Inc','PMLiability_TPVehicleDamageInc','VehicleIncident','VehicleDamage','third-party','VehicleDamage'),
-('TP_INJ',   'Motor','Personal Motor','PMLiability_Inc','PMLiabilityInjuredParty_BIInc','InjuryIncident','BodilyInjuryDamage','third-party','BodilyInjuryDamage'),
-('TP_PRO',   'Motor','Personal Motor','PMLiability_Inc','PMLiability_TPPropertyDamageInc','FixedPropertyIncident','PropertyDamage','third-party','PropertyDamage'),
-('TP_HIRE',  'Motor','Personal Motor','PMLiability_Inc','PMLiability_TPHireMobilityVehicleDmgInc','VehicleIncident','VehicleDamage','third-party','VehicleDamage'),
-('PA_STD',   'Motor','Personal Motor','PMPersonalInjuryAncCov','PMPersonalInjury_AncBIInc','InjuryIncident','BodilyInjuryDamage','insured','BodilyInjuryDamage'),
-('PA_PLUS',  'Motor','Personal Motor','PMPersonalInjuryPlusAncCov','PMPersonalInjuryPlus_AncBIInc','InjuryIncident','BodilyInjuryDamage','insured','BodilyInjuryDamage');
+('GW MOTOR AD','AD_STD',   'Motor','Personal Motor','PMAccidentalDamage_Inc','PMAccidentalDamage_VehicleDamageInc','VehicleIncident','VehicleDamage','insured','VehicleDamage'),
+('GW MOTOR AD','AD_VAN',   'Motor','Personal Motor','PMAccidentalDamage_Inc','PMAccidentalDamage_VehicleDamageInc','VehicleIncident','VehicleDamage','insured','VehicleDamage'),
+('GW MOTOR AD','AD_THEFT', 'Motor','Personal Motor','PMFireAndTheft_Inc','PMFireAndTheft_VehicleDamageInc','VehicleIncident','VehicleDamage','insured','VehicleDamage'),
+('GW MOTOR AD','AD_VAN_THEFT','Motor','Personal Motor','PMFireAndTheft_Inc','PMFireAndTheft_VehicleDamageInc','VehicleIncident','VehicleDamage','insured','VehicleDamage'),
+('GW MOTOR TP','TP_VEH',   'Motor','Personal Motor','PMLiability_Inc','PMLiability_TPVehicleDamageInc','VehicleIncident','VehicleDamage','third-party','VehicleDamage'),
+('GW MOTOR TP','TP_INJ',   'Motor','Personal Motor','PMLiability_Inc','PMLiabilityInjuredParty_BIInc','InjuryIncident','BodilyInjuryDamage','third-party','BodilyInjuryDamage'),
+('GW MOTOR TP','TP_PRO',   'Motor','Personal Motor','PMLiability_Inc','PMLiability_TPPropertyDamageInc','FixedPropertyIncident','PropertyDamage','third-party','PropertyDamage'),
+('GW MOTOR TP','TP_HIRE',  'Motor','Personal Motor','PMLiability_Inc','PMLiability_TPHireMobilityVehicleDmgInc','VehicleIncident','VehicleDamage','third-party','VehicleDamage'),
+('GW PI ANCILLARY','PA_STD',   'Motor','Personal Motor','PMPersonalInjuryAncCov','PMPersonalInjury_AncBIInc','InjuryIncident','BodilyInjuryDamage','insured','BodilyInjuryDamage'),
+('GW PI ANCILLARY','PA_PLUS',  'Motor','Personal Motor','PMPersonalInjuryPlusAncCov','PMPersonalInjuryPlus_AncBIInc','InjuryIncident','BodilyInjuryDamage','insured','BodilyInjuryDamage');
 
 IF OBJECT_ID('dbo.LKP_EXPOSURE_CLAIM_EXCEPTIONS', 'U') IS NOT NULL DROP TABLE dbo.LKP_EXPOSURE_CLAIM_EXCEPTIONS;
 CREATE TABLE dbo.LKP_EXPOSURE_CLAIM_EXCEPTIONS (
@@ -106,29 +223,11 @@ INSERT INTO dbo.LKP_EXPOSURE_CLAIM_EXCEPTIONS VALUES
 ('1112396310', 'THEFT_WITH_TRANS_SUPPRESS_TP'),
 ('1115235695', 'THEFT_WITH_TRANS_SUPPRESS_TP');
 
+-- RETIRED: LKP_TP_CLAIMANT_TYPE is no longer used. ClaimantType now
+-- comes from the real TYPELIST_TABLE_MAPPING table (TypeList_Name =
+-- 'ClaimantType'), confirmed to exist in your environment. See Block B
+-- for the join and the chat message for the ambiguities this surfaced.
 IF OBJECT_ID('dbo.LKP_TP_CLAIMANT_TYPE', 'U') IS NOT NULL DROP TABLE dbo.LKP_TP_CLAIMANT_TYPE;
-CREATE TABLE dbo.LKP_TP_CLAIMANT_TYPE (
-    VectusDisplayString    VARCHAR(100) NOT NULL PRIMARY KEY,
-    CC_ClaimantType_Code   VARCHAR(50)  NOT NULL
-);
-INSERT INTO dbo.LKP_TP_CLAIMANT_TYPE VALUES
-('TP Vehicle Owner',        'veh_other_owner'),
-('Registered Keeper',       'veh_other_owner'),
-('TP Driver & Owner',       'veh_other_driver'),
-('TP Driver',               'veh_other_driver'),
-('TP Driver (DOC)',         'veh_other_driver'),
-('TP Driver (Thief)',       'veh_other_driver'),
-('PH Passenger',            'veh_ins_occupant'),
-('TP Passenger',            'veh_other_occ'),
-('Adult Pedestrian',        'bystander'),
-('Child Pedestrian',        'bystander'),
-('Adult Cyclist',           'cyclist'),
-('Child Cyclist',           'cyclist'),
-('Motorcyclist',            'motorcyclist'),
-('TP Property Owner',       'propertyowner'),
-('Pillion Passenger',       'other'),
-('Company',                 'other'),
-('Secondary Victim',        'other');
 
 
 /* =====================================================================
@@ -192,17 +291,35 @@ TRUNCATE TABLE IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR;
 
 /* --------------------------------------------------------------
    BLOCK A: 1st Party AD Vehicle Exposures
-   FIXED: CLAIM_REF IS NOT NULL added to the LKP_Dupe_MotorAD check.
-   STILL EXCLUDES 'Migrate-group' entirely - open BA question.
+   FIXED per your latest instruction: switched from negative exclusion
+   (throw out the AD ID if a bad label exists anywhere for it) to
+   positive selection (only proceed on a flagged AD ID if a clean
+   Migrate decision exists for it). This correctly handles your stated
+   rule - one real AD ID should only ever have one true solution, and
+   if conflicting labels exist for the same ID (whether via a null-claim
+   junk row or a genuine duplicate data-entry mistake), the clean
+   Migrate label wins over any Descope/Migrate-group noise attached to
+   that same ID. Still excludes AD IDs where ONLY Migrate-group exists
+   (no clean Migrate) - those still need BA's per-claim decision.
    -------------------------------------------------------------- */
 ;WITH AD_ELIGIBLE AS (
     SELECT AD.ID, AD.GW_HDR_CASEID
     FROM SourceStaging.VECCASRN.VEC_GW_MOTOR_AD AD
     WHERE NOT EXISTS (
+        -- this AD ID was never flagged as part of any duplicate-AD
+        -- situation at all - proceed normally, nothing to check
         SELECT 1 FROM SourceStaging.dbo.LKP_Dupe_MotorAD DUPE
-        WHERE DUPE.CLAIM_REF IS NOT NULL
-          AND (DUPE.Solution LIKE 'Descope%' OR DUPE.Solution LIKE 'Migrate-group%')
-          AND AD.ID = DUPE.GW_MOTOR_AD_ID
+        WHERE DUPE.GW_MOTOR_AD_ID = AD.ID
+    )
+    OR EXISTS (
+        -- this AD ID WAS flagged, but a clean, real-claim Migrate
+        -- decision exists for it - that wins regardless of any other
+        -- (mistaken) label also attached to the same ID
+        SELECT 1 FROM SourceStaging.dbo.LKP_Dupe_MotorAD DUPE
+        WHERE DUPE.GW_MOTOR_AD_ID = AD.ID
+          AND DUPE.CLAIM_REF IS NOT NULL
+          AND DUPE.Solution LIKE 'Migrate%'
+          AND DUPE.Solution NOT LIKE 'Migrate-group%'
     )
 ),
 AD_CANDIDATES AS (
@@ -232,7 +349,7 @@ SELECT
      FROM SourceStaging.VECCASRN.VEC_CASE VC WHERE VC.ID = AC.AD_ID),
     AC.CLAIM_REF, 'insured'
 FROM AD_CANDIDATES AC
-INNER JOIN dbo.LKP_EXPOSURE_MOTOR_RULES R ON R.RuleKey =
+INNER JOIN dbo.LKP_EXPOSURE_MOTOR_RULES R ON R.V2CaseFlow = 'GW MOTOR AD' AND R.RuleKey =
     CASE
         WHEN AC.COVERABLE_TYPE = 'PMVan' AND AC.GW_CIRCS_TYPID = 5 THEN 'AD_VAN_THEFT'
         WHEN AC.COVERABLE_TYPE = 'PMVan' THEN 'AD_VAN'
@@ -279,6 +396,21 @@ TP_ELEMENTS AS (
     UNION ALL
     SELECT CLAIM_REF, ClaimPublicID, GW_HDR_CASEID, TP_ID, ClaimantRoleDesc, 'TP_PRO', 'PRO'
     FROM TP_BASE WHERE PROPERTY = 'X'
+),
+CLAIMANT_TYPE_LOOKUP AS (
+    -- FALLBACK ONLY as of v16 - kept for the transition period until
+    -- ClaimantType's own crammed rows in TYPELIST_TABLE_MAPPING are
+    -- split (same fix as ExposureState/LiabilityPosition_Adm, see the
+    -- separate TYPELIST_crammed_row_fix.sql file). Once that's done,
+    -- the exact-match join below in the main SELECT will find
+    -- everything directly and this CTE will simply go unused - safe to
+    -- delete at that point, not required to.
+    SELECT DD.DISPLAY_STRING, TL.GW_TypeCode,
+        ROW_NUMBER() OVER (PARTITION BY DD.DISPLAY_STRING ORDER BY TL.GW_TypeCode) AS RN
+    FROM (SELECT DISTINCT DISPLAY_STRING FROM SourceStaging.VECCASRN.VEC_GW_TPTYPE WHERE DISPLAY_STRING IS NOT NULL) DD
+    INNER JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL
+        ON TL.TypeList_Name = 'ClaimantType'
+       AND TL.Vectus_TypeCode LIKE '%' + DD.DISPLAY_STRING + '%'
 )
 INSERT INTO IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR
 (PublicID, ClaimID, VectusCaseID_Adm, GW_HDR_CASEID, SourceOrigin_Adm, ExposureType, PrimaryCoverage,
@@ -291,10 +423,16 @@ SELECT
     (SELECT CONVERT(DATETIME2(7), CONCAT(VC.CREATE_DATE, ' ', VC.CREATE_TIME))
      FROM SourceStaging.VECCASRN.VEC_CASE VC WHERE VC.ID = TE.TP_ID),
     TE.CLAIM_REF,
-    ISNULL(LK.CC_ClaimantType_Code, 'other')
+    -- PRIMARY: exact match, works once TYPELIST_TABLE_MAPPING's
+    -- ClaimantType rows are split, same as every other typelist join
+    -- in this proc. FALLBACK: the fuzzy LIKE-based lookup, only used
+    -- while that data fix hasn't happened yet.
+    ISNULL(TL_EXACT.GW_TypeCode, ISNULL(CTL.GW_TypeCode, 'other'))
 FROM TP_ELEMENTS TE
-INNER JOIN dbo.LKP_EXPOSURE_MOTOR_RULES R ON R.RuleKey = TE.RuleKey
-LEFT JOIN dbo.LKP_TP_CLAIMANT_TYPE LK ON LK.VectusDisplayString = TE.ClaimantRoleDesc;
+INNER JOIN dbo.LKP_EXPOSURE_MOTOR_RULES R ON R.RuleKey = TE.RuleKey AND R.V2CaseFlow = 'GW MOTOR TP'
+LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_EXACT
+    ON TL_EXACT.TypeList_Name = 'ClaimantType' AND TL_EXACT.Vectus_TypeCode = TE.ClaimantRoleDesc
+LEFT JOIN CLAIMANT_TYPE_LOOKUP CTL ON CTL.DISPLAY_STRING = TE.ClaimantRoleDesc AND CTL.RN = 1;
 
 
 /* --------------------------------------------------------------
@@ -330,7 +468,7 @@ SELECT
     H.CLAIM_REF,
     'other'
 FROM TP_HIRE_CANDIDATES H
-INNER JOIN dbo.LKP_EXPOSURE_MOTOR_RULES R ON R.RuleKey = 'TP_HIRE';
+INNER JOIN dbo.LKP_EXPOSURE_MOTOR_RULES R ON R.RuleKey = 'TP_HIRE' AND R.V2CaseFlow = 'GW MOTOR TP';
 
 
 /* --------------------------------------------------------------
@@ -361,7 +499,7 @@ SELECT
      FROM SourceStaging.VECCASRN.VEC_CASE VC WHERE VC.ID = PC.PA_ID),
     PC.CLAIM_REF, 'insured'
 FROM PA_COV_CHECK PC
-INNER JOIN dbo.LKP_EXPOSURE_MOTOR_RULES R ON R.RuleKey = CASE WHEN PC.HasPlusCov = 1 THEN 'PA_PLUS' ELSE 'PA_STD' END;
+INNER JOIN dbo.LKP_EXPOSURE_MOTOR_RULES R ON R.V2CaseFlow = 'GW PI ANCILLARY' AND R.RuleKey = CASE WHEN PC.HasPlusCov = 1 THEN 'PA_PLUS' ELSE 'PA_STD' END;
 
 
 /* --------------------------------------------------------------
@@ -375,45 +513,72 @@ UPDATE IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR SET AssignmentStatus = 'ass
 
 /* --------------------------------------------------------------
    BLOCK F: CoverageID
-   FIXED (real fix this time, not just a tiebreak): only match against
-   coverage-origin rows (VEC_GMP_COVERAGEID IS NOT NULL), never
-   inclusion-origin rows (INC_ID IS NOT NULL). An inclusion is a
-   sub-term within a coverage, not a standalone insurable category - it
-   should never be picked as an exposure's PrimaryCoverage. CONFIRM this
-   assumption with BA/senior (see chat) - the dedup below is now a
-   backup safeguard only, for the less likely case of two genuine
-   coverage rows sharing a Type.
+   FIXED per your instruction: take BOTH coverage and inclusion rows as
+   valid sources, but PREFER the coverage-origin PublicID (built from
+   COV.ID in usp_Load_IS_COVERAGE) when one exists for that claim+type;
+   only fall back to the inclusion-origin PublicID (built from INC.ID)
+   when no matching coverage row exists at all. A bare ClaimPublicID+
+   Type match (what v10 did) can't guarantee this - if both a coverage
+   row and an inclusion row exist for the same claim+type, it has no
+   way to prefer one over the other. This version does, via explicit
+   priority ordering: VEC_GMP_COVERAGEID IS NOT NULL sorts first.
    -------------------------------------------------------------- */
-;WITH COVERAGE_DEDUP AS (
+;WITH COVERAGE_PRIORITY AS (
     SELECT ClaimPublicID, Type, PublicID,
-        ROW_NUMBER() OVER (PARTITION BY ClaimPublicID, Type ORDER BY PublicID ASC) AS RN
+        ROW_NUMBER() OVER (
+            PARTITION BY ClaimPublicID, Type
+            ORDER BY CASE WHEN VEC_GMP_COVERAGEID IS NOT NULL THEN 1 ELSE 2 END, PublicID ASC
+        ) AS RN
     FROM IntermediateStaging_DEV.dbo.IS_COVERAGE
     WHERE Subtype = 'VehicleCoverage'
-      AND VEC_GMP_COVERAGEID IS NOT NULL   -- NEW: exclude inclusion-origin rows
 )
 UPDATE E
-SET E.CoverageID = CD.PublicID
+SET E.CoverageID = CP.PublicID
 FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR E
-INNER JOIN COVERAGE_DEDUP CD ON CD.ClaimPublicID = E.ClaimID AND CD.Type = E.PrimaryCoverage AND CD.RN = 1;
+INNER JOIN COVERAGE_PRIORITY CP ON CP.ClaimPublicID = E.ClaimID AND CP.Type = E.PrimaryCoverage AND CP.RN = 1;
 
 
 /* --------------------------------------------------------------
-   BLOCK G: IncidentID (provisional, unchanged)
+   BLOCK G: IncidentID
+   FIXED - was constructing a plausible-looking PublicID string via
+   concatenation and writing it directly into IncidentID, WITHOUT
+   verifying a matching row actually exists in IS_INCIDENT. That breaks
+   the PublicID-as-real-pointer convention (same one used correctly for
+   CoverageID/ClaimantDenormID) - a dangling reference is worse than
+   NULL, since it silently passes any "is this populated" check instead
+   of surfacing the gap. Now a real join against IS_INCIDENT.PublicID -
+   if no matching incident row exists (e.g. a combo TP case the
+   incident proc's stricter filter skipped, or a duplicate-AD case
+   excluded there), IncidentID correctly stays NULL instead of pointing
+   at nothing. Still provisional for TP_INJ/TP_PRO/TP_HIRE/PA - no
+   incident-building logic exists for those yet, unchanged from before.
    -------------------------------------------------------------- */
 UPDATE E
-SET E.IncidentID = 'mig:motor:veh:fp' + E.VectusCaseID_Adm
+SET E.IncidentID = INC.PublicID
 FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR E
+INNER JOIN IntermediateStaging_DEV.dbo.IS_INCIDENT INC
+    ON INC.PublicID = 'mig:motor:veh:fp' + E.VectusCaseID_Adm
 WHERE E.SourceOrigin_Adm = 'AD';
 
 UPDATE E
-SET E.IncidentID = 'mig:motor:veh:tp' + E.VectusCaseID_Adm
+SET E.IncidentID = INC.PublicID
 FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR E
+INNER JOIN IntermediateStaging_DEV.dbo.IS_INCIDENT INC
+    ON INC.PublicID = 'mig:motor:veh:tp' + E.VectusCaseID_Adm
 WHERE E.SourceOrigin_Adm = 'TP_VEH';
 
 
 /* --------------------------------------------------------------
    BLOCK H: ClaimantDenormID / ClaimantType
-   FIXED: 3rd party join now uses CM.HDR_TYPE_ID (was CM.GWCFHDR_TYPEID)
+   1st party unchanged (correct, real join, no known issue).
+
+   3rd party - CURRENTLY RUNNING (provisional): claim-level only. The
+   PRIMCONT_TYPE='Y' filter below excludes SECONDARY/incidental contacts
+   within the HDR_TYPE_ID=55 bucket - it does NOT distinguish between
+   two different PRIMARY third parties on the same claim (e.g. the other
+   driver vs. a separate pedestrian - both would pass PRIMCONT_TYPE='Y'
+   equally). That's a different problem than what this filter solves,
+   and this join still can't tell them apart - hence still provisional.
    -------------------------------------------------------------- */
 UPDATE E
 SET E.ClaimantDenormID = CC.ContactID
@@ -429,9 +594,37 @@ INNER JOIN IntermediateStaging_DEV.dbo.CONTACT_MASTER_MOTOR CM ON CM.GW_HDR_CASE
 INNER JOIN SourceStaging.VECCASRN.VEC_GW_CF_HDR_TYPE HT ON HT.ID = CM.HDR_TYPE_ID AND HT.PRIMCONT_TYPE = 'Y'
 WHERE E.SourceOrigin_Adm IN ('TP_VEH','TP_INJ','TP_PRO','TP_HIRE');
 
+/* --------------------------------------------------------------
+   THE ACTUAL FIX - not live yet, waiting on your senior to add the
+   per-TP-case column to CONTACT_MASTER_MOTOR (suggested name below:
+   VectusCaseID_Adm, matching the naming convention this proc already
+   uses for the same concept on IS_EXPOSURE_MOTOR itself). The moment
+   that column exists and is confirmed populated correctly, swap the
+   3rd-party block above for this one - the only change is
+   CM.GW_HDR_CASEID = E.GW_HDR_CASEID becomes CM.VectusCaseID_Adm =
+   E.VectusCaseID_Adm, pinning the match to the exact TP case instead
+   of the whole claim.
+
+UPDATE E
+SET E.ClaimantDenormID = CM.PublicID
+FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR E
+INNER JOIN IntermediateStaging_DEV.dbo.CONTACT_MASTER_MOTOR CM
+    ON CM.VectusCaseID_Adm = E.VectusCaseID_Adm
+    AND CM.HDR_TYPE_ID = 55
+INNER JOIN SourceStaging.VECCASRN.VEC_GW_CF_HDR_TYPE HT ON HT.ID = CM.HDR_TYPE_ID AND HT.PRIMCONT_TYPE = 'Y'
+WHERE E.SourceOrigin_Adm IN ('TP_VEH','TP_INJ','TP_PRO','TP_HIRE');
+
+   -------------------------------------------------------------- */
+
 
 /* --------------------------------------------------------------
    BLOCK I: BI/Liability fields
+   LiabilityPosition_Adm: CONFIRMED - TYPELIST_TABLE_MAPPING's crammed
+   'Admitted Split Agreed' cell is being split into 'Admitted' and
+   'Split Agreed' (see TYPELIST_crammed_row_fix.sql). 'Under
+   Investigation' and 'No Admission - Agree to deal' were confirmed
+   already-correct single values, not crammed. No code change needed
+   here - already exact-match, will resolve correctly once that fix runs.
    -------------------------------------------------------------- */
 UPDATE E
 SET E.LiabilityPosition_Adm = TL.GW_TypeCode
@@ -480,6 +673,12 @@ INNER JOIN CIL_TOTALS CT ON CT.GW_HDR_CASEID = E.GW_HDR_CASEID;
 
 /* --------------------------------------------------------------
    BLOCK K: State / CloseDate
+   State: CONFIRMED - TYPELIST_TABLE_MAPPING's crammed 'Open Re-opened
+   Re-Opened' cell is being split into 'Open' and 'Re-Opened' (the real
+   distinct VEC_GW_CASE_STATUS.STATUS values - note lowercase
+   'Re-opened' does NOT actually occur in real data and is correctly
+   excluded from the split). No code change needed here - already
+   exact-match, will resolve correctly once that fix runs.
    -------------------------------------------------------------- */
 UPDATE E
 SET E.State = TL.GW_TypeCode
@@ -566,28 +765,91 @@ WHERE UPPER(LTRIM(RTRIM(CLM.PRODUCT))) = 'MOTOR'
 GROUP BY CLM.CLAIM_REF
 HAVING COUNT(*) > 1;
 
+-- UPDATED: unmapped DISPLAY_STRING check now uses the same LIKE logic
+-- as the live join (was checking against the retired LKP_TP_CLAIMANT_TYPE)
 SELECT DISTINCT T.DISPLAY_STRING
 FROM SourceStaging.VECCASRN.VEC_GW_TP_SUMMARY S
 INNER JOIN SourceStaging.VECCASRN.VEC_GW_TPTYPE T ON T.ID = S.GW_TP_TYPEID
-WHERE NOT EXISTS (SELECT 1 FROM dbo.LKP_TP_CLAIMANT_TYPE LK WHERE LK.VectusDisplayString = T.DISPLAY_STRING);
+WHERE T.DISPLAY_STRING IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1 FROM SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL
+      WHERE TL.TypeList_Name = 'ClaimantType' AND TL.Vectus_TypeCode LIKE '%' + T.DISPLAY_STRING + '%'
+  );
+
+-- NEW: ambiguous DISPLAY_STRING values - matches more than one GW_TypeCode
+-- row in TYPELIST_TABLE_MAPPING. Bring this exact output to whoever owns
+-- that table - 'TP Driver (Thief)' and 'Company' are confirmed to appear
+-- here already based on the sample data you shared.
+SELECT DD.DISPLAY_STRING, TL.GW_TypeCode, TL.Vectus_TypeCode
+FROM (SELECT DISTINCT DISPLAY_STRING FROM SourceStaging.VECCASRN.VEC_GW_TPTYPE WHERE DISPLAY_STRING IS NOT NULL) DD
+INNER JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL
+    ON TL.TypeList_Name = 'ClaimantType' AND TL.Vectus_TypeCode LIKE '%' + DD.DISPLAY_STRING + '%'
+WHERE DD.DISPLAY_STRING IN (
+    SELECT DD2.DISPLAY_STRING
+    FROM (SELECT DISTINCT DISPLAY_STRING FROM SourceStaging.VECCASRN.VEC_GW_TPTYPE WHERE DISPLAY_STRING IS NOT NULL) DD2
+    INNER JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL2
+        ON TL2.TypeList_Name = 'ClaimantType' AND TL2.Vectus_TypeCode LIKE '%' + DD2.DISPLAY_STRING + '%'
+    GROUP BY DD2.DISPLAY_STRING
+    HAVING COUNT(*) > 1
+)
+ORDER BY DD.DISPLAY_STRING;
 
 SELECT ClaimID, SourceOrigin_Adm, COUNT(*) AS cnt
 FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR
 GROUP BY ClaimID, SourceOrigin_Adm
 ORDER BY cnt DESC;
 
--- NEW: HARD CONSTRAINT CHECK per the BA session - "I cannot create two
+-- NEW: confirm GW_CIRCS_TYPID=5 really means FIRETHEFT (closes the loop
+-- on MOTOR_CIRC_LOSSCAUSE_MAPPING - now confirmed NOT used for exposure
+-- creation, only claim-level LossCause/Circumstance_Adm fields)
+SELECT ID, TYPCODE FROM SourceStaging.VECCASRN.VEC_GW_CIRCS_TYP WHERE ID = 5;
+
+-- NEW: any Descope-only claims with no Migrate partner at all - these
+-- would silently end up with ZERO AD exposures, separate from the
+-- Migrate-group question
+SELECT DISTINCT D.CLAIM_REF
+FROM SourceStaging.dbo.LKP_Dupe_MotorAD D
+WHERE D.CLAIM_REF IS NOT NULL AND D.Solution LIKE 'Descope%'
+  AND NOT EXISTS (
+      SELECT 1 FROM SourceStaging.dbo.LKP_Dupe_MotorAD D2
+      WHERE D2.CLAIM_REF = D.CLAIM_REF
+        AND (D2.Solution = 'Migrate' OR D2.Solution LIKE 'MIGRATE%')
+  );
+
+-- HARD CONSTRAINT CHECK per the BA session - "I cannot create two
 -- first-party vehicle exposures" for one claim. This must return ZERO
 -- rows before anything goes to CCST. Any row here means LKP_Dupe_MotorAD
 -- doesn't yet cover a real duplicate-AD pair on that claim - take these
 -- exact claim refs back to BA for a decision-table update, do not guess
--- which one to keep.
--- NEW: are there real duplicate coverage-origin (not inclusion) rows
--- sharing a Type for one claim? This is the case the dedup safety net
--- actually exists for, now that inclusions are excluded above.
+-- which one to keep. (Duplicated further below intentionally removed -
+-- this was the only orphaned copy, cleanup per your instruction to check
+-- for exactly this kind of leftover mess.)
+
+-- Which exposures are being resolved via a coverage row vs. falling back
+-- to an inclusion row - worth eyeballing to see how often the fallback
+-- path actually gets used in your real data
+SELECT E.PublicID, E.PrimaryCoverage,
+    CASE WHEN COV.VEC_GMP_COVERAGEID IS NOT NULL THEN 'coverage' ELSE 'inclusion (fallback)' END AS resolved_via
+FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR E
+INNER JOIN IntermediateStaging_DEV.dbo.IS_COVERAGE COV ON COV.PublicID = E.CoverageID;
+
+-- NEW: real AD IDs with genuinely conflicting solutions attached (not
+-- the null-claim junk pattern, which is handled separately - this finds
+-- cases where TWO OR MORE real-claim rows disagree on the same AD ID,
+-- confirming your stated rule that this can only be a data-entry mistake)
+SELECT GW_MOTOR_AD_ID, COUNT(DISTINCT Solution) AS distinct_solutions,
+       STRING_AGG(CONCAT(CLAIM_REF, ':', Solution), ' | ') AS all_claim_solution_pairs
+FROM SourceStaging.dbo.LKP_Dupe_MotorAD
+WHERE CLAIM_REF IS NOT NULL
+GROUP BY GW_MOTOR_AD_ID
+HAVING COUNT(DISTINCT Solution) > 1;
+
+-- Duplicate-Type check across ALL IS_COVERAGE rows (coverage + inclusion
+-- combined) - now the relevant check, since origin no longer matters for
+-- which row wins, only that a deterministic one does.
 SELECT ClaimPublicID, Type, COUNT(*) AS dup_count
 FROM IntermediateStaging_DEV.dbo.IS_COVERAGE
-WHERE Subtype = 'VehicleCoverage' AND VEC_GMP_COVERAGEID IS NOT NULL
+WHERE Subtype = 'VehicleCoverage'
 GROUP BY ClaimPublicID, Type
 HAVING COUNT(*) > 1;
 
