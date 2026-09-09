@@ -1,4 +1,24 @@
 /* =====================================================================
+   IS_EXPOSURE_MOTOR — v20
+   Two changes, both per your latest instruction:
+     1. LKP_EXPOSURE_CLAIM_EXCEPTIONS removed entirely, along with the
+        three Vandal/TP Driver (Thief) suppression conditions in Block
+        B's TP_BASE that used it - deferred, not resolved. TP exposures
+        now created for every TP element regardless of claimant role.
+     2. Block C (Hire & Mobility) FIXED: ClaimantType was hardcoded
+        'other' - per the mapping doc's own ClaimantType rule ("Mapping
+        required for all 3rd party exposure types (V2 cases: GW_MOTOR_TP
+        & Hire & Mobility)"), it should use the same DISPLAY_STRING
+        typelist lookup as the other TP blocks. Added the join and the
+        same exact-match+fallback pattern as Block B.
+   Re-verified ClaimantDenormID/ClaimantType logic against the mapping
+   sheet text you resupplied - both already matched (1st party =
+   insured via IS_CLAIMCONTACTROLE; 3rd party = primary contact via
+   HDR_TYPE_ID=55+PRIMCONT_TYPE), no further change needed there beyond
+   the Block C fix above. Full file re-verified before shipping - Blocks
+   A, D through K, and all lookup tables confirmed unchanged.
+   ===================================================================== */
+/* =====================================================================
    IS_EXPOSURE_MOTOR — v19
    CORRECTION to my own v18 edit: I'd accidentally deleted the 1st-party
    ClaimantDenormID UPDATE while adding commentary - caught and restored
@@ -211,17 +231,14 @@ INSERT INTO dbo.LKP_EXPOSURE_MOTOR_RULES VALUES
 ('GW PI ANCILLARY','PA_STD',   'Motor','Personal Motor','PMPersonalInjuryAncCov','PMPersonalInjury_AncBIInc','InjuryIncident','BodilyInjuryDamage','insured','BodilyInjuryDamage'),
 ('GW PI ANCILLARY','PA_PLUS',  'Motor','Personal Motor','PMPersonalInjuryPlusAncCov','PMPersonalInjuryPlus_AncBIInc','InjuryIncident','BodilyInjuryDamage','insured','BodilyInjuryDamage');
 
-IF OBJECT_ID('dbo.LKP_EXPOSURE_CLAIM_EXCEPTIONS', 'U') IS NOT NULL DROP TABLE dbo.LKP_EXPOSURE_CLAIM_EXCEPTIONS;
-CREATE TABLE dbo.LKP_EXPOSURE_CLAIM_EXCEPTIONS (
-    CLAIM_REF       VARCHAR(50) NOT NULL,
-    ExceptionType   VARCHAR(50) NOT NULL,
-    PRIMARY KEY (CLAIM_REF, ExceptionType)
-);
-INSERT INTO dbo.LKP_EXPOSURE_CLAIM_EXCEPTIONS VALUES
-('1113847462', 'VANDAL_CREATE_TP'),
-('1114562093', 'THEFT_NO_TRANS_CREATE_TP'),
-('1112396310', 'THEFT_WITH_TRANS_SUPPRESS_TP'),
-('1115235695', 'THEFT_WITH_TRANS_SUPPRESS_TP');
+-- REMOVED per your instruction: LKP_EXPOSURE_CLAIM_EXCEPTIONS and all
+-- Alleged Vandal/TP Driver (Thief) suppression logic that used it are
+-- deferred for now - see Block B, the three NOT(...) exclusion
+-- conditions that referenced this table have been stripped out
+-- entirely, not just the exception carve-out within them. This means
+-- TP exposures are currently created for ALL TP elements regardless of
+-- claimant role (Vandal/Thief included) - revisit once you have
+-- clarity on this from BA/senior.
 
 -- RETIRED: LKP_TP_CLAIMANT_TYPE is no longer used. ClaimantType now
 -- comes from the real TYPELIST_TABLE_MAPPING table (TypeList_Name =
@@ -362,6 +379,10 @@ INNER JOIN dbo.LKP_EXPOSURE_MOTOR_RULES R ON R.V2CaseFlow = 'GW MOTOR AD' AND R.
    BLOCK B: 3rd Party Exposures (Vehicle / Injury / Property)
    -------------------------------------------------------------- */
 ;WITH TP_BASE AS (
+    -- Vandal/TP Driver (Thief) suppression logic REMOVED per your
+    -- instruction (deferred, not resolved) - only the base
+    -- PRODUCT='MOTOR' filter remains. Every TP element currently
+    -- creates its exposure regardless of claimant role.
     SELECT
         CLM.CLAIM_REF, CLM.PUBLICID AS ClaimPublicID, CLM.GW_HDR_CASEID, TP.ID AS TP_ID,
         TPS.VEHICLE, TPS.INJURY, TPS.PROPERTY, TPTYPE.DISPLAY_STRING AS ClaimantRoleDesc
@@ -370,14 +391,6 @@ INNER JOIN dbo.LKP_EXPOSURE_MOTOR_RULES R ON R.V2CaseFlow = 'GW MOTOR AD' AND R.
     LEFT JOIN SourceStaging.VECCASRN.VEC_GW_TP_SUMMARY TPS ON TPS.CASEID = TP.ID
     LEFT JOIN SourceStaging.VECCASRN.VEC_GW_TPTYPE TPTYPE ON TPTYPE.ID = TPS.GW_TP_TYPEID
     WHERE UPPER(LTRIM(RTRIM(CLM.PRODUCT))) = 'MOTOR'
-      AND NOT (TPTYPE.DISPLAY_STRING = 'Alleged Vandal'
-               AND NOT EXISTS (SELECT 1 FROM dbo.LKP_EXPOSURE_CLAIM_EXCEPTIONS E WHERE E.CLAIM_REF = CLM.CLAIM_REF AND E.ExceptionType = 'VANDAL_CREATE_TP'))
-      AND NOT (TPTYPE.DISPLAY_STRING = 'TP Driver (Thief)'
-               AND NOT EXISTS (SELECT 1 FROM SourceStaging.VECCASRN.VEC_GW_PAY_TRANS PT WHERE PT.GW_HDR_CASEID = CLM.GW_HDR_CASEID)
-               AND NOT EXISTS (SELECT 1 FROM dbo.LKP_EXPOSURE_CLAIM_EXCEPTIONS E WHERE E.CLAIM_REF = CLM.CLAIM_REF AND E.ExceptionType = 'THEFT_NO_TRANS_CREATE_TP'))
-      AND NOT (TPTYPE.DISPLAY_STRING = 'TP Driver (Thief)'
-               AND EXISTS (SELECT 1 FROM SourceStaging.VECCASRN.VEC_GW_PAY_TRANS PT WHERE PT.GW_HDR_CASEID = CLM.GW_HDR_CASEID)
-               AND EXISTS (SELECT 1 FROM dbo.LKP_EXPOSURE_CLAIM_EXCEPTIONS E WHERE E.CLAIM_REF = CLM.CLAIM_REF AND E.ExceptionType = 'THEFT_WITH_TRANS_SUPPRESS_TP'))
 ),
 TP_ELEMENTS AS (
     -- RESOLVED: the VEH/PRO combo question is settled per the mapping
@@ -437,13 +450,23 @@ LEFT JOIN CLAIMANT_TYPE_LOOKUP CTL ON CTL.DISPLAY_STRING = TE.ClaimantRoleDesc A
 
 /* --------------------------------------------------------------
    BLOCK C: 3rd Party Hire & Mobility
-   PAYMENT CODE LIST CONFLICT - see chat message.
+   FIXED: ClaimantType was hardcoded 'other' - the mapping doc's own
+   ClaimantType section explicitly says "Mapping required for all 3rd
+   party exposure types (V2 cases: GW_MOTOR_TP & Hire & Mobility) -
+   check the typelist mapping for claimantType, based on V2
+   DISPLAY_STRING". Hire & Mobility exposures come from the same TP
+   case as the other TP elements, so the same DISPLAY_STRING lookup
+   applies - added the join to get it, same exact-match+fallback
+   pattern as Block B.
+   PAYMENT CODE LIST CONFLICT - see chat message, unrelated to this fix.
    -------------------------------------------------------------- */
 ;WITH TP_HIRE_CANDIDATES AS (
-    SELECT CLM.CLAIM_REF, CLM.PUBLICID AS ClaimPublicID, CLM.GW_HDR_CASEID, TP.ID AS TP_ID
+    SELECT CLM.CLAIM_REF, CLM.PUBLICID AS ClaimPublicID, CLM.GW_HDR_CASEID, TP.ID AS TP_ID,
+           TPTYPE.DISPLAY_STRING AS ClaimantRoleDesc
     FROM IntermediateStaging_DEV.dbo.IS_CLAIM_MASTER CLM
     INNER JOIN SourceStaging.VECCASRN.VEC_GW_MOTOR_TP TP ON TP.GW_HDR_CASEID = CLM.GW_HDR_CASEID
     LEFT JOIN SourceStaging.VECCASRN.VEC_GW_TP_SUMMARY TPS ON TPS.CASEID = TP.ID
+    LEFT JOIN SourceStaging.VECCASRN.VEC_GW_TPTYPE TPTYPE ON TPTYPE.ID = TPS.GW_TP_TYPEID
     WHERE UPPER(LTRIM(RTRIM(CLM.PRODUCT))) = 'MOTOR'
       AND (
             EXISTS (
@@ -454,6 +477,15 @@ LEFT JOIN CLAIMANT_TYPE_LOOKUP CTL ON CTL.DISPLAY_STRING = TE.ClaimantRoleDesc A
             )
             OR (TPS.VEHICLE = 'X' AND EXISTS (SELECT 1 FROM SourceStaging.VECCASRN.VEC_GW_HIREREC HR WHERE HR.CASEID = TP.ID))
       )
+),
+CLAIMANT_TYPE_LOOKUP AS (
+    -- same fallback CTE as Block B - see that block's comments
+    SELECT DD.DISPLAY_STRING, TL.GW_TypeCode,
+        ROW_NUMBER() OVER (PARTITION BY DD.DISPLAY_STRING ORDER BY TL.GW_TypeCode) AS RN
+    FROM (SELECT DISTINCT DISPLAY_STRING FROM SourceStaging.VECCASRN.VEC_GW_TPTYPE WHERE DISPLAY_STRING IS NOT NULL) DD
+    INNER JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL
+        ON TL.TypeList_Name = 'ClaimantType'
+       AND TL.Vectus_TypeCode LIKE '%' + DD.DISPLAY_STRING + '%'
 )
 INSERT INTO IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR
 (PublicID, ClaimID, VectusCaseID_Adm, GW_HDR_CASEID, SourceOrigin_Adm, ExposureType, PrimaryCoverage,
@@ -466,9 +498,12 @@ SELECT
     (SELECT CONVERT(DATETIME2(7), CONCAT(VC.CREATE_DATE, ' ', VC.CREATE_TIME))
      FROM SourceStaging.VECCASRN.VEC_CASE VC WHERE VC.ID = H.TP_ID),
     H.CLAIM_REF,
-    'other'
+    ISNULL(TL_EXACT.GW_TypeCode, ISNULL(CTL.GW_TypeCode, 'other'))
 FROM TP_HIRE_CANDIDATES H
-INNER JOIN dbo.LKP_EXPOSURE_MOTOR_RULES R ON R.RuleKey = 'TP_HIRE' AND R.V2CaseFlow = 'GW MOTOR TP';
+INNER JOIN dbo.LKP_EXPOSURE_MOTOR_RULES R ON R.RuleKey = 'TP_HIRE' AND R.V2CaseFlow = 'GW MOTOR TP'
+LEFT JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING TL_EXACT
+    ON TL_EXACT.TypeList_Name = 'ClaimantType' AND TL_EXACT.Vectus_TypeCode = H.ClaimantRoleDesc
+LEFT JOIN CLAIMANT_TYPE_LOOKUP CTL ON CTL.DISPLAY_STRING = H.ClaimantRoleDesc AND CTL.RN = 1;
 
 
 /* --------------------------------------------------------------
