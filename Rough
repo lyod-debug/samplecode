@@ -1,0 +1,11 @@
+LEFT JOIN IntermediateStaging_DEV.dbo.IS_INCIDENT INC ON INC.PublicID =
+        CASE TE.RuleKey
+            WHEN 'TP_VEH' THEN 'mig:motor:veh:tp' + CONVERT(VARCHAR(64), TE.TP_ID)
+            WHEN 'TP_INJ' THEN 'mig:motor:inj:tp' + CONVERT(VARCHAR(64), TE.TP_ID)
+            WHEN 'TP_PRO' THEN 'mig:motor:fpi:tp' + CONVERT(VARCHAR(64), TE.TP_ID)
+        END
+
+
+LEFT JOIN IntermediateStaging_DEV.dbo.IS_INCIDENT INC ON INC.PublicID = 'mig:motor:veh:tp' + CONVERT(VARCHAR(64), H.TP_ID)
+
+LEFT JOIN IntermediateStaging_DEV.dbo.IS_INCIDENT INC ON INC.PublicID = 'mig:motor:inj:FP' + CONVERT(VARCHAR(20), PC.PA_ID)
