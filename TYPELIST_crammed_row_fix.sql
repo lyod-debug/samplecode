@@ -93,51 +93,115 @@ FROM SourceStaging.dbo.TYPELIST_TABLE_MAPPING
 WHERE TypeList_Name = 'ClaimantType';
 
 /* --------------------------------------------------------------
-   STEP 3: apply the confirmed splits. Expands each crammed row into
-   N individual rows (carrying every other column forward unchanged),
-   then removes the original crammed row. BACK UP the table before
-   running this on anything but a small confirmed batch.
-   FIXED: the real crammed cells have inconsistent internal spacing
-   (extra/uneven spaces between the different values someone typed by
-   hand) - an exact string match against what was typed here would
-   silently find nothing. NormalizeSpaces() collapses any run of 2+
-   spaces down to 1 (and trims the ends) on BOTH sides of the
-   comparison, so matching works regardless of the real spacing.
+   STEP 3 (REPLACED): delete-and-reinsert instead of matching the whole
+   crammed string. This sidesteps the whitespace/tab/invisible-character
+   problem entirely - each crammed row is found by a short, distinctive
+   multi-word fragment with WILDCARDS BETWEEN EACH WORD (not just at the
+   start/end), so it doesn't matter what invisible character sits
+   between "TP" and "Vehicle" and "Owner" - only that those three words
+   appear in that order somewhere in the row.
+   STEP 3a: capture each crammed row's OTHER columns (GW_TypeCode,
+   TypeList_CC_Table_Name, etc.) into a staging table BEFORE deleting -
+   this way we never have to know or type those values ourselves, we
+   just carry the real ones forward.
    -------------------------------------------------------------- */
-IF OBJECT_ID('dbo.NormalizeSpaces', 'FN') IS NOT NULL DROP FUNCTION dbo.NormalizeSpaces;
-GO
-CREATE FUNCTION dbo.NormalizeSpaces(@Input VARCHAR(500))
-RETURNS VARCHAR(500)
-AS
-BEGIN
-    DECLARE @Result VARCHAR(500) = @Input;
-    -- WIDENED: the real data uses tabs (and possibly non-breaking
-    -- spaces) between crammed values, not just repeated regular spaces -
-    -- confirmed from the huge visual gap in the SSMS results grid
-    -- screenshot. Convert both to a plain space FIRST, then collapse.
-    SET @Result = REPLACE(@Result, CHAR(9), ' ');    -- tab -> space
-    SET @Result = REPLACE(@Result, CHAR(160), ' ');  -- non-breaking space -> space
-    SET @Result = LTRIM(RTRIM(REPLACE(REPLACE(REPLACE(@Result, ' ', '<>'), '><', ''), '<>', ' ')));
-    RETURN @Result;
-END
-GO
+IF OBJECT_ID('dbo.TYPELIST_CLAIMANTTYPE_CAPTURED', 'U') IS NOT NULL DROP TABLE dbo.TYPELIST_CLAIMANTTYPE_CAPTURED;
+SELECT *,
+    CASE
+        WHEN Vectus_TypeCode LIKE '%TP%Vehicle%Owner%' THEN 'VEH_ROW'
+        WHEN Vectus_TypeCode LIKE '%Alleged%Vandal%' THEN 'DRIVER_ROW'
+        WHEN Vectus_TypeCode LIKE '%Adult%Pedestrian%' THEN 'PEDESTRIAN_ROW'
+        WHEN Vectus_TypeCode LIKE '%TP%Property%Owner%' THEN 'PRO_ROW'
+        WHEN Vectus_TypeCode LIKE '%Secondary%Victim%' THEN 'OTHER_ROW'
+    END AS RowTag
+INTO dbo.TYPELIST_CLAIMANTTYPE_CAPTURED
+FROM SourceStaging.dbo.TYPELIST_TABLE_MAPPING
+WHERE TypeList_Name = 'ClaimantType'
+  AND (
+        Vectus_TypeCode LIKE '%TP%Vehicle%Owner%'
+     OR Vectus_TypeCode LIKE '%Alleged%Vandal%'
+     OR Vectus_TypeCode LIKE '%Adult%Pedestrian%'
+     OR Vectus_TypeCode LIKE '%TP%Property%Owner%'
+     OR Vectus_TypeCode LIKE '%Secondary%Victim%'
+      );
 
+-- CHECK before proceeding: this must return exactly 5 rows, one per
+-- RowTag, with no NULLs in RowTag. If it doesn't, STOP and look at why -
+-- do not continue to the DELETE below until this looks right.
+SELECT * FROM dbo.TYPELIST_CLAIMANTTYPE_CAPTURED;
+
+/* --------------------------------------------------------------
+   STEP 3b: delete the original crammed rows, same identifying condition.
+   -------------------------------------------------------------- */
+DELETE FROM SourceStaging.dbo.TYPELIST_TABLE_MAPPING
+WHERE TypeList_Name = 'ClaimantType'
+  AND (
+        Vectus_TypeCode LIKE '%TP%Vehicle%Owner%'
+     OR Vectus_TypeCode LIKE '%Alleged%Vandal%'
+     OR Vectus_TypeCode LIKE '%Adult%Pedestrian%'
+     OR Vectus_TypeCode LIKE '%TP%Property%Owner%'
+     OR Vectus_TypeCode LIKE '%Secondary%Victim%'
+      );
+
+/* --------------------------------------------------------------
+   STEP 3c: insert clean rows, reusing each captured row's other real
+   column values via RowTag - only the new individual Vectus_TypeCode
+   is hardcoded, everything else comes from the real captured data.
+   'TP Driver (Thief)' is INTERIM per BA - maps to whatever GW_TypeCode
+   the DRIVER_ROW carries (veh_other_driver), pending her real decision.
+   -------------------------------------------------------------- */
 INSERT INTO SourceStaging.dbo.TYPELIST_TABLE_MAPPING
 (Vectus_TypeCode, Vectus_Description, [Household/Motor/Both], TypeList_Name, TypeList_CC_Table_Name, GW_TypeCode, GW_TypeCode_Description, Name)
-SELECT
-    SC.IndividualVectusTypeCode,
-    ORIG.Vectus_Description, ORIG.[Household/Motor/Both], ORIG.TypeList_Name,
-    ORIG.TypeList_CC_Table_Name, ORIG.GW_TypeCode, ORIG.GW_TypeCode_Description, ORIG.Name
-FROM dbo.TYPELIST_SPLIT_CONFIRMED SC
-INNER JOIN SourceStaging.dbo.TYPELIST_TABLE_MAPPING ORIG
-    ON ORIG.TypeList_Name = SC.TypeList_Name
-   AND dbo.NormalizeSpaces(ORIG.Vectus_TypeCode) = dbo.NormalizeSpaces(SC.OriginalCrammedValue);
-
-DELETE ORIG
-FROM SourceStaging.dbo.TYPELIST_TABLE_MAPPING ORIG
-INNER JOIN (SELECT DISTINCT TypeList_Name, OriginalCrammedValue FROM dbo.TYPELIST_SPLIT_CONFIRMED) SC
-    ON ORIG.TypeList_Name = SC.TypeList_Name
-   AND dbo.NormalizeSpaces(ORIG.Vectus_TypeCode) = dbo.NormalizeSpaces(SC.OriginalCrammedValue);
+SELECT 'TP Vehicle Owner', Vectus_Description, [Household/Motor/Both], TypeList_Name, TypeList_CC_Table_Name, GW_TypeCode, GW_TypeCode_Description, Name
+FROM dbo.TYPELIST_CLAIMANTTYPE_CAPTURED WHERE RowTag = 'VEH_ROW'
+UNION ALL
+SELECT 'Company (for V2 VEH case)', Vectus_Description, [Household/Motor/Both], TypeList_Name, TypeList_CC_Table_Name, GW_TypeCode, GW_TypeCode_Description, Name
+FROM dbo.TYPELIST_CLAIMANTTYPE_CAPTURED WHERE RowTag = 'VEH_ROW'
+UNION ALL
+SELECT 'TP Driver & Owner', Vectus_Description, [Household/Motor/Both], TypeList_Name, TypeList_CC_Table_Name, GW_TypeCode, GW_TypeCode_Description, Name
+FROM dbo.TYPELIST_CLAIMANTTYPE_CAPTURED WHERE RowTag = 'DRIVER_ROW'
+UNION ALL
+SELECT 'TP Driver', Vectus_Description, [Household/Motor/Both], TypeList_Name, TypeList_CC_Table_Name, GW_TypeCode, GW_TypeCode_Description, Name
+FROM dbo.TYPELIST_CLAIMANTTYPE_CAPTURED WHERE RowTag = 'DRIVER_ROW'
+UNION ALL
+SELECT 'TP Driver (DOC)', Vectus_Description, [Household/Motor/Both], TypeList_Name, TypeList_CC_Table_Name, GW_TypeCode, GW_TypeCode_Description, Name
+FROM dbo.TYPELIST_CLAIMANTTYPE_CAPTURED WHERE RowTag = 'DRIVER_ROW'
+UNION ALL
+SELECT 'TP Driver (Thief)', Vectus_Description, [Household/Motor/Both], TypeList_Name, TypeList_CC_Table_Name, GW_TypeCode, GW_TypeCode_Description, Name
+FROM dbo.TYPELIST_CLAIMANTTYPE_CAPTURED WHERE RowTag = 'DRIVER_ROW'
+UNION ALL
+SELECT 'Alleged Vandal', Vectus_Description, [Household/Motor/Both], TypeList_Name, TypeList_CC_Table_Name, GW_TypeCode, GW_TypeCode_Description, Name
+FROM dbo.TYPELIST_CLAIMANTTYPE_CAPTURED WHERE RowTag = 'DRIVER_ROW'
+UNION ALL
+SELECT 'Adult Pedestrian', Vectus_Description, [Household/Motor/Both], TypeList_Name, TypeList_CC_Table_Name, GW_TypeCode, GW_TypeCode_Description, Name
+FROM dbo.TYPELIST_CLAIMANTTYPE_CAPTURED WHERE RowTag = 'PEDESTRIAN_ROW'
+UNION ALL
+SELECT 'Child Pedestrian', Vectus_Description, [Household/Motor/Both], TypeList_Name, TypeList_CC_Table_Name, GW_TypeCode, GW_TypeCode_Description, Name
+FROM dbo.TYPELIST_CLAIMANTTYPE_CAPTURED WHERE RowTag = 'PEDESTRIAN_ROW'
+UNION ALL
+SELECT 'TP Property Owner', Vectus_Description, [Household/Motor/Both], TypeList_Name, TypeList_CC_Table_Name, GW_TypeCode, GW_TypeCode_Description, Name
+FROM dbo.TYPELIST_CLAIMANTTYPE_CAPTURED WHERE RowTag = 'PRO_ROW'
+UNION ALL
+SELECT 'Company (for V2 PRO case)', Vectus_Description, [Household/Motor/Both], TypeList_Name, TypeList_CC_Table_Name, GW_TypeCode, GW_TypeCode_Description, Name
+FROM dbo.TYPELIST_CLAIMANTTYPE_CAPTURED WHERE RowTag = 'PRO_ROW'
+UNION ALL
+SELECT 'Motorcyclist', Vectus_Description, [Household/Motor/Both], TypeList_Name, TypeList_CC_Table_Name, GW_TypeCode, GW_TypeCode_Description, Name
+FROM dbo.TYPELIST_CLAIMANTTYPE_CAPTURED WHERE RowTag = 'OTHER_ROW'
+UNION ALL
+SELECT 'Adult Cyclist', Vectus_Description, [Household/Motor/Both], TypeList_Name, TypeList_CC_Table_Name, GW_TypeCode, GW_TypeCode_Description, Name
+FROM dbo.TYPELIST_CLAIMANTTYPE_CAPTURED WHERE RowTag = 'OTHER_ROW'
+UNION ALL
+SELECT 'Child Cyclist', Vectus_Description, [Household/Motor/Both], TypeList_Name, TypeList_CC_Table_Name, GW_TypeCode, GW_TypeCode_Description, Name
+FROM dbo.TYPELIST_CLAIMANTTYPE_CAPTURED WHERE RowTag = 'OTHER_ROW'
+UNION ALL
+SELECT 'Pillion Passenger', Vectus_Description, [Household/Motor/Both], TypeList_Name, TypeList_CC_Table_Name, GW_TypeCode, GW_TypeCode_Description, Name
+FROM dbo.TYPELIST_CLAIMANTTYPE_CAPTURED WHERE RowTag = 'OTHER_ROW'
+UNION ALL
+SELECT 'Registered Keeper', Vectus_Description, [Household/Motor/Both], TypeList_Name, TypeList_CC_Table_Name, GW_TypeCode, GW_TypeCode_Description, Name
+FROM dbo.TYPELIST_CLAIMANTTYPE_CAPTURED WHERE RowTag = 'OTHER_ROW'
+UNION ALL
+SELECT 'Secondary Victim', Vectus_Description, [Household/Motor/Both], TypeList_Name, TypeList_CC_Table_Name, GW_TypeCode, GW_TypeCode_Description, Name
+FROM dbo.TYPELIST_CLAIMANTTYPE_CAPTURED WHERE RowTag = 'OTHER_ROW';
 
 /* --------------------------------------------------------------
    STEP 4: confirm the fix worked - exact-match joins should now find
