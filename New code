@@ -1,0 +1,44 @@
+TP_INCIDENT_ELIGIBLE AS (
+    SELECT TB.TP_ID,
+        CASE WHEN TB.VEHICLE = 'X' AND COALESCE(TB.INJURY,'') <> 'X' AND COALESCE(TB.PROPERTY,'') <> 'X'
+                  AND EXISTS (SELECT 1 FROM SourceStaging.VECCASRN.VEC_GW_VEHICLE VEH WHERE VEH.CASEID = TB.GW_HDR_CASEID)
+             THEN 1 ELSE 0 END AS VehEligible,
+        CASE WHEN COALESCE(TB.VEHICLE,'') <> 'X' AND TB.INJURY = 'X' AND COALESCE(TB.PROPERTY,'') <> 'X'
+             THEN 1 ELSE 0 END AS InjEligible,
+        CASE WHEN COALESCE(TB.VEHICLE,'') <> 'X' AND COALESCE(TB.INJURY,'') <> 'X' AND TB.PROPERTY = 'X'
+                  AND EXISTS (SELECT 1 FROM SourceStaging.VECCASRN.VEC_GW_TPPROP_HDR HDR WHERE HDR.CASEID = TB.TP_ID)
+             THEN 1 ELSE 0 END AS ProEligible
+    FROM TP_BASE TB
+
+
+/* IncidentID -- ALL 3 now via TP_INCIDENT_ELIGIBLE (source tables
+       directly, no IS_INCIDENT dependency left in this block). Each of
+       the 3 uses an EXCLUSIVE filter (only its own element flagged) -
+       on a combo TP case, none of the 3 get a matching incident. */
+    CASE
+        WHEN TE.RuleKey = 'TP_VEH' AND TIE.VehEligible = 1 THEN 'mig:motor:veh:tp' + CONVERT(VARCHAR(64), TE.TP_ID)
+        WHEN TE.RuleKey = 'TP_INJ' AND TIE.InjEligible = 1 THEN 'mig:motor:inj:tp' + CONVERT(VARCHAR(64), TE.TP_ID)
+        WHEN TE.RuleKey = 'TP_PRO' AND TIE.ProEligible = 1 THEN 'mig:motor:fpi:tp' + CONVERT(VARCHAR(64), TE.TP_ID)
+        ELSE NULL
+    END,
+
+
+
+
+BI_RESERVE AS (
+    SELECT RANKED.CASEID, RA.CLAIM_LIFE, RA.LIABILITY, RA.YRS_TO_ISSUE
+    FROM (
+        SELECT RT.ID, RT.CASEID,
+            ROW_NUMBER() OVER (PARTITION BY RT.CASEID ORDER BY RT.GORDER DESC) AS RN
+        FROM SourceStaging.VECCASRN.VEC_GW_RES_TRANS RT
+        WHERE RT.ACCEPTED = 'Y'
+          AND RT.CASEID IN (
+              SELECT TPS.CASEID
+              FROM IntermediateStaging_DEV.dbo.IS_CLAIM_MASTER CLM_BI
+              INNER JOIN SourceStaging.VECCASRN.VEC_GW_TP_SUMMARY TPS ON TPS.GW_HDR_CASEID = CLM_BI.GW_HDR_CASEID
+              WHERE UPPER(LTRIM(RTRIM(CLM_BI.PRODUCT))) = 'MOTOR' AND TPS.INJURY = 'X'
+          )
+    ) RANKED
+    LEFT JOIN SourceStaging.VECCASRN.VEC_GW_RES_ADJUST RA ON RA.GW_RES_TRANSID = RANKED.ID
+    WHERE RANKED.RN = 1
+)
