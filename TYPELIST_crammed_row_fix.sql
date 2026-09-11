@@ -81,6 +81,18 @@ INSERT INTO dbo.TYPELIST_SPLIT_CONFIRMED VALUES
 -- The exposure proc's join is what picks the right one per case type.
 
 /* --------------------------------------------------------------
+   STEP 2b: diagnose the invisible-character issue before trusting the
+   normalization below. Run this first - if it shows HAS TAB or HAS
+   NON-BREAKING SPACE, that confirms what NormalizeSpaces() needs to
+   handle (already updated below to cover both).
+   -------------------------------------------------------------- */
+SELECT Vectus_TypeCode,
+    CASE WHEN Vectus_TypeCode LIKE '%' + CHAR(9) + '%' THEN 'HAS TAB' ELSE 'no tab' END AS tab_check,
+    CASE WHEN Vectus_TypeCode LIKE '%' + CHAR(160) + '%' THEN 'HAS NON-BREAKING SPACE' ELSE 'no nbsp' END AS nbsp_check
+FROM SourceStaging.dbo.TYPELIST_TABLE_MAPPING
+WHERE TypeList_Name = 'ClaimantType';
+
+/* --------------------------------------------------------------
    STEP 3: apply the confirmed splits. Expands each crammed row into
    N individual rows (carrying every other column forward unchanged),
    then removes the original crammed row. BACK UP the table before
@@ -98,7 +110,15 @@ CREATE FUNCTION dbo.NormalizeSpaces(@Input VARCHAR(500))
 RETURNS VARCHAR(500)
 AS
 BEGIN
-    RETURN LTRIM(RTRIM(REPLACE(REPLACE(REPLACE(@Input, ' ', '<>'), '><', ''), '<>', ' ')));
+    DECLARE @Result VARCHAR(500) = @Input;
+    -- WIDENED: the real data uses tabs (and possibly non-breaking
+    -- spaces) between crammed values, not just repeated regular spaces -
+    -- confirmed from the huge visual gap in the SSMS results grid
+    -- screenshot. Convert both to a plain space FIRST, then collapse.
+    SET @Result = REPLACE(@Result, CHAR(9), ' ');    -- tab -> space
+    SET @Result = REPLACE(@Result, CHAR(160), ' ');  -- non-breaking space -> space
+    SET @Result = LTRIM(RTRIM(REPLACE(REPLACE(REPLACE(@Result, ' ', '<>'), '><', ''), '<>', ' ')));
+    RETURN @Result;
 END
 GO
 
