@@ -10,16 +10,17 @@
      - Mandatory roles logic and PublicID generation are NOT changed.
 
    WHAT CHANGED (search for these names in the code):
-     MOTOR      STEP 2B   #MOTOR_INCIDENT_BY_CASE_VEH  vehicle incident = IS_EXPOSURE_MOTOR.IncidentType = 'VehicleDamage' (no IS_INCIDENT join)
-                STEP 2B   #MOTOR_EXPOSURE_BY_CASE_VEH  vehicle exposure of that incident (prefer TP_VEH)
+     MOTOR + HOUSEHOLD  STEP 2A / 2B  #HH_INCIDENT_BY_TP_CASE and #MOTOR_INCIDENT_BY_TP_CASE = the incident OF THE PICKED EXPOSURE (no independent MIN)
+     MOTOR      STEP 2B   #MOTOR_INCIDENT_BY_TP_CASE_VEH  vehicle incident = IS_EXPOSURE_MOTOR.IncidentType = 'VehicleDamage' (no IS_INCIDENT join)
+                STEP 2B   #MOTOR_EXPOSURE_BY_TP_CASE_VEH  vehicle exposure of that incident (prefer TP_VEH)
                 STEP 3B   #LKP_ROLES_MOTOR ExposureID / IncidentID CASE  (5 roles: repairshop, hirecompany_adm, thirdparty_adm, tpinsurer_Adm, recoveryagent)
                           Hire-versus-vehicle choice is NOT implemented: it is pending BA (the pick stays the lowest incident ID).
-     HOUSEHOLD  STEP 2A   #HH_INCIDENT_BY_CASE_VEH     vehicle incident = IS_INCIDENT.Subtype = 'VehicleIncident' (household incidents, third-party exposures only)
-                STEP 2A   #HH_EXPOSURE_BY_CASE_VEH     vehicle exposure of that incident
+     HOUSEHOLD  STEP 2A   #HH_INCIDENT_BY_TP_CASE_VEH     vehicle incident = IS_INCIDENT.Subtype = 'VehicleIncident' (household incidents, third-party CASE exposures only, selected by the PublicID prefix mig:hhtp)
+                STEP 2A   #HH_EXPOSURE_BY_TP_CASE_VEH     vehicle exposure of that incident
                 STEP 3A   #LKP_ROLES_HH   ExposureID / IncidentID CASE   (3 roles: thirdparty_adm, tpinsurer_Adm, recoveryagent)
                           claim-level fallback REMOVED for third-party roles
      STEP 0 / STEP 6      DROP lines for the new temp tables
-   Household claim-level pickers (#HH_EXPOSURE_BY_CLAIM / #HH_INCIDENT_BY_CLAIM) are still created but not used (kept for a possible first-party rule).
+   Household claim-level pickers (#HH_EXPOSURE_BY_CLAIM / #HH_INCIDENT_BY_CLAIM) REMOVED: Household first-party roles have no exposure / incident link in the mapping.
    ===================================================================================================== */
 USE [IntermediateStaging_DEV]
 GO
@@ -40,18 +41,16 @@ BEGIN
 
     IF OBJECT_ID('tempdb..#BASE_CONTACT_ROLE_HH') IS NOT NULL DROP TABLE #BASE_CONTACT_ROLE_HH;
     IF OBJECT_ID('tempdb..#BASE_CONTACT_ROLE_MOTOR') IS NOT NULL DROP TABLE #BASE_CONTACT_ROLE_MOTOR;
-    IF OBJECT_ID('tempdb..#HH_EXPOSURE_BY_CASE') IS NOT NULL DROP TABLE #HH_EXPOSURE_BY_CASE;
-    IF OBJECT_ID('tempdb..#HH_INCIDENT_BY_CASE') IS NOT NULL DROP TABLE #HH_INCIDENT_BY_CASE;
-    IF OBJECT_ID('tempdb..#HH_EXPOSURE_BY_CLAIM') IS NOT NULL DROP TABLE #HH_EXPOSURE_BY_CLAIM;
-    IF OBJECT_ID('tempdb..#HH_INCIDENT_BY_CLAIM') IS NOT NULL DROP TABLE #HH_INCIDENT_BY_CLAIM;
-    IF OBJECT_ID('tempdb..#HH_INCIDENT_BY_CASE_VEH') IS NOT NULL DROP TABLE #HH_INCIDENT_BY_CASE_VEH;
-    IF OBJECT_ID('tempdb..#HH_EXPOSURE_BY_CASE_VEH') IS NOT NULL DROP TABLE #HH_EXPOSURE_BY_CASE_VEH;
-    IF OBJECT_ID('tempdb..#MOTOR_EXPOSURE_BY_CASE') IS NOT NULL DROP TABLE #MOTOR_EXPOSURE_BY_CASE;
-    IF OBJECT_ID('tempdb..#MOTOR_INCIDENT_BY_CASE') IS NOT NULL DROP TABLE #MOTOR_INCIDENT_BY_CASE;
+    IF OBJECT_ID('tempdb..#HH_EXPOSURE_BY_TP_CASE') IS NOT NULL DROP TABLE #HH_EXPOSURE_BY_TP_CASE;
+    IF OBJECT_ID('tempdb..#HH_INCIDENT_BY_TP_CASE') IS NOT NULL DROP TABLE #HH_INCIDENT_BY_TP_CASE;
+    IF OBJECT_ID('tempdb..#HH_INCIDENT_BY_TP_CASE_VEH') IS NOT NULL DROP TABLE #HH_INCIDENT_BY_TP_CASE_VEH;
+    IF OBJECT_ID('tempdb..#HH_EXPOSURE_BY_TP_CASE_VEH') IS NOT NULL DROP TABLE #HH_EXPOSURE_BY_TP_CASE_VEH;
+    IF OBJECT_ID('tempdb..#MOTOR_EXPOSURE_BY_TP_CASE') IS NOT NULL DROP TABLE #MOTOR_EXPOSURE_BY_TP_CASE;
+    IF OBJECT_ID('tempdb..#MOTOR_INCIDENT_BY_TP_CASE') IS NOT NULL DROP TABLE #MOTOR_INCIDENT_BY_TP_CASE;
     IF OBJECT_ID('tempdb..#MOTOR_EXPOSURE_BY_CLAIM') IS NOT NULL DROP TABLE #MOTOR_EXPOSURE_BY_CLAIM;
     IF OBJECT_ID('tempdb..#MOTOR_EXPOSURE_BY_CLAIM_PA') IS NOT NULL DROP TABLE #MOTOR_EXPOSURE_BY_CLAIM_PA;
-    IF OBJECT_ID('tempdb..#MOTOR_INCIDENT_BY_CASE_VEH') IS NOT NULL DROP TABLE #MOTOR_INCIDENT_BY_CASE_VEH;
-    IF OBJECT_ID('tempdb..#MOTOR_EXPOSURE_BY_CASE_VEH') IS NOT NULL DROP TABLE #MOTOR_EXPOSURE_BY_CASE_VEH;
+    IF OBJECT_ID('tempdb..#MOTOR_INCIDENT_BY_TP_CASE_VEH') IS NOT NULL DROP TABLE #MOTOR_INCIDENT_BY_TP_CASE_VEH;
+    IF OBJECT_ID('tempdb..#MOTOR_EXPOSURE_BY_TP_CASE_VEH') IS NOT NULL DROP TABLE #MOTOR_EXPOSURE_BY_TP_CASE_VEH;
     IF OBJECT_ID('tempdb..#LKP_ROLES_HH') IS NOT NULL DROP TABLE #LKP_ROLES_HH;
     IF OBJECT_ID('tempdb..#LKP_ROLES_MOTOR') IS NOT NULL DROP TABLE #LKP_ROLES_MOTOR;
 
@@ -142,49 +141,35 @@ BEGIN
     /* ========================================================================
        STEP 2A: HOUSEHOLD EXPOSURE & INCIDENT PICKERS
        ======================================================================== */
-    -- 1. Subcase level (VectusCaseID_Adm: Buildings, Contents, TP)
+    -- Third-party case level (VectusCaseID_Adm of the mig:hhtp exposures)
     SELECT
         EXP.VectusCaseID_Adm AS V2_SubCaseID,
         MIN(EXP.PublicID) AS PickedExposureID
-    INTO #HH_EXPOSURE_BY_CASE
+    INTO #HH_EXPOSURE_BY_TP_CASE
     FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_HOUSEHOLD EXP
     WHERE EXP.VectusCaseID_Adm IS NOT NULL
+      AND EXP.PublicID LIKE 'mig:hhtp%'   -- third-party CASE exposures only: the PublicID prefix is hard-coded per block of the exposure proc (mig:hhtp = TP, mig:hhb = buildings, mig:hhc = contents); case IDs come from 3 tables and can repeat
     GROUP BY EXP.VectusCaseID_Adm;
 
-    CREATE UNIQUE CLUSTERED INDEX CIX_HEBC ON #HH_EXPOSURE_BY_CASE (V2_SubCaseID);
+    CREATE UNIQUE CLUSTERED INDEX CIX_HEBC ON #HH_EXPOSURE_BY_TP_CASE (V2_SubCaseID);
 
+    /* CHANGE: the incident is the incident OF THE EXPOSURE THAT WAS PICKED above, not an independent MIN over all incidents of the case.
+       NOTE: while the household exposure table has one PublicID on several rows with different incidents (the damage_id duplicates), the incident of
+       "the picked exposure" is still ambiguous for those cases (lowest incident of that PublicID). It becomes exact once the exposure PublicIDs are unique. */
     SELECT
         EXP.VectusCaseID_Adm AS V2_SubCaseID,
         MIN(EXP.IncidentID) AS PickedIncidentID
-    INTO #HH_INCIDENT_BY_CASE
+    INTO #HH_INCIDENT_BY_TP_CASE
     FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_HOUSEHOLD EXP
+    INNER JOIN #HH_EXPOSURE_BY_TP_CASE PX
+        ON PX.V2_SubCaseID = EXP.VectusCaseID_Adm
+       AND PX.PickedExposureID = EXP.PublicID
     WHERE EXP.VectusCaseID_Adm IS NOT NULL
+      AND EXP.PublicID LIKE 'mig:hhtp%'   -- third-party case exposures only (same reason as above)
       AND EXP.IncidentID IS NOT NULL
     GROUP BY EXP.VectusCaseID_Adm;
 
-    CREATE UNIQUE CLUSTERED INDEX CIX_HIBC ON #HH_INCIDENT_BY_CASE (V2_SubCaseID);
-
-    -- 2. Main Claim Header level (GW_HDR_CASEID / ClaimPublicID fallback)
-    SELECT
-        EXP.ClaimID AS ClaimPublicID,
-        MIN(EXP.PublicID) AS PickedExposureID
-    INTO #HH_EXPOSURE_BY_CLAIM
-    FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_HOUSEHOLD EXP
-    WHERE EXP.LossParty = 'insured'
-    GROUP BY EXP.ClaimID;
-
-    CREATE UNIQUE CLUSTERED INDEX CIX_HHEBC ON #HH_EXPOSURE_BY_CLAIM (ClaimPublicID);
-
-    SELECT
-        EXP.ClaimID AS ClaimPublicID,
-        MIN(EXP.IncidentID) AS PickedIncidentID
-    INTO #HH_INCIDENT_BY_CLAIM
-    FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_HOUSEHOLD EXP
-    WHERE EXP.LossParty = 'insured'
-      AND EXP.IncidentID IS NOT NULL
-    GROUP BY EXP.ClaimID;
-
-    CREATE UNIQUE CLUSTERED INDEX CIX_HHIBC ON #HH_INCIDENT_BY_CLAIM (ClaimPublicID);
+    CREATE UNIQUE CLUSTERED INDEX CIX_HIBC ON #HH_INCIDENT_BY_TP_CASE (V2_SubCaseID);
 
     /* CHANGE (Household): thirdparty_adm, tpinsurer_Adm, recoveryagent may only sit on a VehicleIncident (Guidewire load errors, same as Motor).
        The household exposure table has no incident type column, so for HOUSEHOLD ONLY we join IS_INCIDENT (filtered to household:
@@ -194,39 +179,39 @@ BEGIN
     SELECT
         EXP.VectusCaseID_Adm AS V2_SubCaseID,
         MIN(EXP.IncidentID) AS PickedIncidentID
-    INTO #HH_INCIDENT_BY_CASE_VEH
+    INTO #HH_INCIDENT_BY_TP_CASE_VEH
     FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_HOUSEHOLD EXP
     INNER JOIN IntermediateStaging_DEV.dbo.IS_INCIDENT INC
         ON INC.PublicID = EXP.IncidentID
        AND INC.PublicID LIKE 'mig:HH%'               -- household incidents only
     WHERE EXP.VectusCaseID_Adm IS NOT NULL
-      AND EXP.LossParty = 'third_party'              -- case IDs come from 3 tables (HHT/HHB/HHC); only the third-party case is meant here
+      AND EXP.PublicID LIKE 'mig:hhtp%'   -- third-party CASE exposures only. Buildings / contents exposures can ALSO carry a vehicle incident ('mig:HH_veh<id>', no _tp), but they are not the TP case's incident
       AND EXP.IncidentID IS NOT NULL
       AND INC.Subtype = 'VehicleIncident'            -- CONFIRM column name Subtype on IS_INCIDENT (run HH check V0 first)
     GROUP BY EXP.VectusCaseID_Adm;
 
-    CREATE UNIQUE CLUSTERED INDEX CIX_HHIBC_VEH ON #HH_INCIDENT_BY_CASE_VEH (V2_SubCaseID);
+    CREATE UNIQUE CLUSTERED INDEX CIX_HHIBC_VEH ON #HH_INCIDENT_BY_TP_CASE_VEH (V2_SubCaseID);
 
     /* The vehicle EXPOSURE for the same 3 roles = the household exposure of the same TP case that sits on the picked vehicle incident. */
     SELECT
         EXP.VectusCaseID_Adm AS V2_SubCaseID,
         MIN(EXP.PublicID) AS PickedExposureID
-    INTO #HH_EXPOSURE_BY_CASE_VEH
+    INTO #HH_EXPOSURE_BY_TP_CASE_VEH
     FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_HOUSEHOLD EXP
-    INNER JOIN #HH_INCIDENT_BY_CASE_VEH V
+    INNER JOIN #HH_INCIDENT_BY_TP_CASE_VEH V
         ON V.V2_SubCaseID = EXP.VectusCaseID_Adm
        AND V.PickedIncidentID = EXP.IncidentID
-    WHERE EXP.LossParty = 'third_party'
+    WHERE EXP.PublicID LIKE 'mig:hhtp%'   -- third-party CASE exposures only
     GROUP BY EXP.VectusCaseID_Adm;
 
-    CREATE UNIQUE CLUSTERED INDEX CIX_HEBC_VEH ON #HH_EXPOSURE_BY_CASE_VEH (V2_SubCaseID);
+    CREATE UNIQUE CLUSTERED INDEX CIX_HEBC_VEH ON #HH_EXPOSURE_BY_TP_CASE_VEH (V2_SubCaseID);
 
     /* ========================================================================
        STEP 2B: MOTOR EXPOSURE & INCIDENT PICKERS
        CHANGED (mapping-driven, see notes): the mapping sheet says which KIND of
        exposure each role links to, so each picker now only looks at that kind:
          - TP roles  ("Link to 1 of the TP exposures created from the V2 TP case")
-              -> #MOTOR_EXPOSURE_BY_CASE / #MOTOR_INCIDENT_BY_CASE
+              -> #MOTOR_EXPOSURE_BY_TP_CASE / #MOTOR_INCIDENT_BY_TP_CASE
                  keyed by TP.ID (VectusCaseID_Adm), TP_* exposures only
          - AD roles  ("ONLY link to the AD/F&T exposure")
               -> #MOTOR_EXPOSURE_BY_CLAIM   (claim header level, AD exposure only)
@@ -239,25 +224,31 @@ BEGIN
     SELECT
         EXP.VectusCaseID_Adm AS V2_SubCaseID,
         MIN(EXP.Exposure_Motor_PublicID) AS PickedExposureID
-    INTO #MOTOR_EXPOSURE_BY_CASE
+    INTO #MOTOR_EXPOSURE_BY_TP_CASE
     FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR EXP
     WHERE EXP.VectusCaseID_Adm IS NOT NULL
       AND EXP.SourceOrigin_Adm IN ('TP_VEH', 'TP_INJ', 'TP_PRO', 'TP_HIRE')
     GROUP BY EXP.VectusCaseID_Adm;
 
-    CREATE UNIQUE CLUSTERED INDEX CIX_MEBC ON #MOTOR_EXPOSURE_BY_CASE (V2_SubCaseID);
+    CREATE UNIQUE CLUSTERED INDEX CIX_MEBC ON #MOTOR_EXPOSURE_BY_TP_CASE (V2_SubCaseID);
 
+    /* CHANGE: the incident is the incident OF THE EXPOSURE THAT WAS PICKED above (same exposure row), not an independent MIN over all incidents.
+       Reason: exposure IDs and incident IDs sort differently (e.g. exposure 'mig:motor_tp_hm..' sorts first, but incident 'mig:motor_fpi_tp..' / 'mig:motor_inj_tp..'
+       sort before 'mig:motor_veh_HM..'), so two independent MINs can point to two different exposures of the same TP case. */
     SELECT
         EXP.VectusCaseID_Adm AS V2_SubCaseID,
-        MIN(EXP.IncidentID) AS PickedIncidentID
-    INTO #MOTOR_INCIDENT_BY_CASE
+        MIN(EXP.IncidentID) AS PickedIncidentID      -- one exposure has one IncidentID; MIN only collapses identical rows
+    INTO #MOTOR_INCIDENT_BY_TP_CASE
     FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR EXP
+    INNER JOIN #MOTOR_EXPOSURE_BY_TP_CASE PX
+        ON PX.V2_SubCaseID = EXP.VectusCaseID_Adm
+       AND PX.PickedExposureID = EXP.Exposure_Motor_PublicID
     WHERE EXP.VectusCaseID_Adm IS NOT NULL
       AND EXP.SourceOrigin_Adm IN ('TP_VEH', 'TP_INJ', 'TP_PRO', 'TP_HIRE')
       AND EXP.IncidentID IS NOT NULL
     GROUP BY EXP.VectusCaseID_Adm;
 
-    CREATE UNIQUE CLUSTERED INDEX CIX_MIBC ON #MOTOR_INCIDENT_BY_CASE (V2_SubCaseID);
+    CREATE UNIQUE CLUSTERED INDEX CIX_MIBC ON #MOTOR_INCIDENT_BY_TP_CASE (V2_SubCaseID);
 
     -- 2. 1st party, claim header level: the AD / F&T exposure
     SELECT
@@ -276,7 +267,7 @@ BEGIN
         MIN(EXP.Exposure_Motor_PublicID) AS PickedExposureID
     INTO #MOTOR_EXPOSURE_BY_CLAIM_PA
     FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR EXP
-    WHERE EXP.SourceOrigin_Adm IN ('PA', 'PA_PLUS')
+    WHERE EXP.SourceOrigin_Adm = 'PA'   -- exposure proc stores 'PA' for both PA and PA_PLUS (PA_PLUS is only the lookup RuleKey)
     GROUP BY EXP.ClaimID;
 
     CREATE UNIQUE CLUSTERED INDEX CIX_MEBCLM_PA ON #MOTOR_EXPOSURE_BY_CLAIM_PA (ClaimPublicID);
@@ -292,7 +283,7 @@ BEGIN
     SELECT
         EXP.VectusCaseID_Adm AS V2_SubCaseID,
         MIN(EXP.IncidentID) AS PickedIncidentID
-    INTO #MOTOR_INCIDENT_BY_CASE_VEH
+    INTO #MOTOR_INCIDENT_BY_TP_CASE_VEH
     FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR EXP
     WHERE EXP.VectusCaseID_Adm IS NOT NULL
       AND EXP.SourceOrigin_Adm IN ('TP_VEH', 'TP_INJ', 'TP_PRO', 'TP_HIRE')
@@ -300,7 +291,7 @@ BEGIN
       AND EXP.IncidentType = 'VehicleDamage'       -- vehicle incident = IncidentType 'VehicleDamage' on IS_EXPOSURE_MOTOR (TP_VEH and TP_HIRE), no IS_INCIDENT
     GROUP BY EXP.VectusCaseID_Adm;
 
-    CREATE UNIQUE CLUSTERED INDEX CIX_MIBC_VEH ON #MOTOR_INCIDENT_BY_CASE_VEH (V2_SubCaseID);
+    CREATE UNIQUE CLUSTERED INDEX CIX_MIBC_VEH ON #MOTOR_INCIDENT_BY_TP_CASE_VEH (V2_SubCaseID);
 
     /* BA: the 5 vehicle-incident roles also link to the CORRESPONDING vehicle exposure = the exposure
        that belongs to the picked VehicleIncident of the same TP case (prefer the TP_VEH exposure,
@@ -311,15 +302,15 @@ BEGIN
             MIN(CASE WHEN EXP.SourceOrigin_Adm = 'TP_VEH' THEN EXP.Exposure_Motor_PublicID END),
             MIN(EXP.Exposure_Motor_PublicID)
         ) AS PickedExposureID
-    INTO #MOTOR_EXPOSURE_BY_CASE_VEH
+    INTO #MOTOR_EXPOSURE_BY_TP_CASE_VEH
     FROM IntermediateStaging_DEV.dbo.IS_EXPOSURE_MOTOR EXP
-    INNER JOIN #MOTOR_INCIDENT_BY_CASE_VEH V
+    INNER JOIN #MOTOR_INCIDENT_BY_TP_CASE_VEH V
         ON V.V2_SubCaseID = EXP.VectusCaseID_Adm
        AND V.PickedIncidentID = EXP.IncidentID
     WHERE EXP.SourceOrigin_Adm IN ('TP_VEH', 'TP_INJ', 'TP_PRO', 'TP_HIRE')
     GROUP BY EXP.VectusCaseID_Adm;
 
-    CREATE UNIQUE CLUSTERED INDEX CIX_MEBC_VEH ON #MOTOR_EXPOSURE_BY_CASE_VEH (V2_SubCaseID);
+    CREATE UNIQUE CLUSTERED INDEX CIX_MEBC_VEH ON #MOTOR_EXPOSURE_BY_TP_CASE_VEH (V2_SubCaseID);
 
 
     /* ========================================================================
@@ -391,17 +382,13 @@ BEGIN
                 )
             )
         )
-    LEFT JOIN #HH_EXPOSURE_BY_CASE EBC
+    LEFT JOIN #HH_EXPOSURE_BY_TP_CASE EBC
         ON EBC.V2_SubCaseID = CONVERT(VARCHAR(64), B.V2_SubCaseID)
-    LEFT JOIN #HH_INCIDENT_BY_CASE IBC
+    LEFT JOIN #HH_INCIDENT_BY_TP_CASE IBC
         ON IBC.V2_SubCaseID = CONVERT(VARCHAR(64), B.V2_SubCaseID)
-    LEFT JOIN #HH_EXPOSURE_BY_CLAIM EBCLM
-        ON EBCLM.ClaimPublicID = B.ClaimPublicID
-    LEFT JOIN #HH_INCIDENT_BY_CLAIM IBCLM
-        ON IBCLM.ClaimPublicID = B.ClaimPublicID
-    LEFT JOIN #HH_INCIDENT_BY_CASE_VEH IBC_VEH
+    LEFT JOIN #HH_INCIDENT_BY_TP_CASE_VEH IBC_VEH
         ON IBC_VEH.V2_SubCaseID = CONVERT(VARCHAR(64), B.V2_SubCaseID)
-    LEFT JOIN #HH_EXPOSURE_BY_CASE_VEH EBC_VEH
+    LEFT JOIN #HH_EXPOSURE_BY_TP_CASE_VEH EBC_VEH
         ON EBC_VEH.V2_SubCaseID = CONVERT(VARCHAR(64), B.V2_SubCaseID);
 
     CREATE NONCLUSTERED INDEX IX_LKP ON #LKP_ROLES_HH (HDR_TYPE_ID);
@@ -475,13 +462,13 @@ BEGIN
                 )
             )
         )
-    LEFT JOIN #MOTOR_EXPOSURE_BY_CASE EBC
+    LEFT JOIN #MOTOR_EXPOSURE_BY_TP_CASE EBC
         ON EBC.V2_SubCaseID = CONVERT(VARCHAR(64), B.V2_SubCaseID)
-    LEFT JOIN #MOTOR_INCIDENT_BY_CASE IBC
+    LEFT JOIN #MOTOR_INCIDENT_BY_TP_CASE IBC
         ON IBC.V2_SubCaseID = CONVERT(VARCHAR(64), B.V2_SubCaseID)
-    LEFT JOIN #MOTOR_EXPOSURE_BY_CASE_VEH EBC_VEH
+    LEFT JOIN #MOTOR_EXPOSURE_BY_TP_CASE_VEH EBC_VEH
         ON EBC_VEH.V2_SubCaseID = CONVERT(VARCHAR(64), B.V2_SubCaseID)
-    LEFT JOIN #MOTOR_INCIDENT_BY_CASE_VEH IBC_VEH
+    LEFT JOIN #MOTOR_INCIDENT_BY_TP_CASE_VEH IBC_VEH
         ON IBC_VEH.V2_SubCaseID = CONVERT(VARCHAR(64), B.V2_SubCaseID)
     LEFT JOIN #MOTOR_EXPOSURE_BY_CLAIM EBCLM
         ON EBCLM.ClaimPublicID = B.ClaimPublicID
@@ -549,6 +536,7 @@ BEGIN
             WHERE HDR_TYPE_ID = 127
         ) TPC ON TPC.V2_SubCaseID = CONVERT(VARCHAR(64), EXP.VectusCaseID_Adm)
         WHERE EXP.LossParty = 'third_party'
+          AND EXP.PublicID LIKE 'mig:hhtp%'   -- same prefix filter as the pickers: Household case IDs come from 3 tables and can repeat
     ),
 
     /* --- Motor Mandatory Insured & Reporter --- */
@@ -684,18 +672,16 @@ BEGIN
        ======================================================================== */
     DROP TABLE #BASE_CONTACT_ROLE_HH;
     DROP TABLE #BASE_CONTACT_ROLE_MOTOR;
-    DROP TABLE #HH_EXPOSURE_BY_CASE;
-    DROP TABLE #HH_INCIDENT_BY_CASE;
-    DROP TABLE #HH_EXPOSURE_BY_CLAIM;
-    DROP TABLE #HH_INCIDENT_BY_CLAIM;
-    DROP TABLE #HH_INCIDENT_BY_CASE_VEH;
-    DROP TABLE #HH_EXPOSURE_BY_CASE_VEH;
-    DROP TABLE #MOTOR_EXPOSURE_BY_CASE;
-    DROP TABLE #MOTOR_INCIDENT_BY_CASE;
+    DROP TABLE #HH_EXPOSURE_BY_TP_CASE;
+    DROP TABLE #HH_INCIDENT_BY_TP_CASE;
+    DROP TABLE #HH_INCIDENT_BY_TP_CASE_VEH;
+    DROP TABLE #HH_EXPOSURE_BY_TP_CASE_VEH;
+    DROP TABLE #MOTOR_EXPOSURE_BY_TP_CASE;
+    DROP TABLE #MOTOR_INCIDENT_BY_TP_CASE;
     DROP TABLE #MOTOR_EXPOSURE_BY_CLAIM;
     DROP TABLE #MOTOR_EXPOSURE_BY_CLAIM_PA;
-    DROP TABLE #MOTOR_INCIDENT_BY_CASE_VEH;
-    DROP TABLE #MOTOR_EXPOSURE_BY_CASE_VEH;
+    DROP TABLE #MOTOR_INCIDENT_BY_TP_CASE_VEH;
+    DROP TABLE #MOTOR_EXPOSURE_BY_TP_CASE_VEH;
     DROP TABLE #LKP_ROLES_HH;
     DROP TABLE #LKP_ROLES_MOTOR;
 
